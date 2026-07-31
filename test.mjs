@@ -312,6 +312,24 @@ try {
   assert.doesNotMatch(subscriptionDisplay, /\breset\s/);
   assert.equal(subscriptionDisplay.split(" • ").length, 5);
 
+  const commandCtx = { ...ctx };
+  await commands.get("usage").handler("refresh", commandCtx);
+  assert.deepEqual(notifications.at(-1), {
+    message: "Usage refreshed: Remote.",
+    level: "info",
+  });
+  globalThis.fetch = async () => {
+    throw new Error("network down");
+  };
+  await commands.get("usage").handler("refresh", ctx);
+  assert.deepEqual(notifications.at(-1), {
+    message: "Usage refresh failed: network down",
+    level: "error",
+  });
+  const failedDisplay = widgets.get("pi-usage")?.lines.join("\n");
+  assert.ok(failedDisplay?.startsWith(subscriptionDisplay));
+  assert.match(failedDisplay, /\(1m ago\)$/);
+
   writeFileSync(join(stateDir, "pi-usage.json"), JSON.stringify({
     version: 1,
     providerModes: {

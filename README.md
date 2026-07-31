@@ -59,7 +59,7 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
 
 | 命令 | 功能 |
 |---|---|
-| `/usage refresh` | 重新查询当前已匹配 profile 的远程额度，或重新计算本地 session 指标；不重新读取配置文件。成功后直接更新独立 usage 行；失败时保留最后成功缓存并弹出具体错误。 |
+| `/usage refresh` | 重新查询当前已匹配 profile 的远程额度，或重新计算本地 session 指标；不重新读取配置文件。成功后更新独立 usage 行并弹出成功提示；失败时保留最后成功缓存并弹出具体错误。后台刷新尚未结束或当前没有活动 profile 时也会给出明确提示。 |
 | `/usage reload` | 重新读取 `~/.pi/agent/pi-usage.json`，按当前模型重新选择 profile，应用缓存并在后台发起新一次刷新；同时重建刷新和倒计时定时器。 |
 | `/usage status` | 不发送 usage 请求；显示当前 profile ID、当前 `provider/model`、实际配置路径，以及最近一次刷新错误（如有）。 |
 

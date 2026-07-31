@@ -30,6 +30,12 @@ const CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
 
 type BillingType = "subscription" | "metered";
 
+type RefreshResult =
+	| { status: "success" }
+	| { status: "error"; error: string }
+	| { status: "busy" }
+	| { status: "inactive" };
+
 type AuthConfig = {
 	type?: "model" | "provider" | "env" | "none";
 	provider?: string;
@@ -945,8 +951,10 @@ export default function piUsage(pi: ExtensionAPI) {
 		lastUpdatedAt = saved?.updatedAt;
 	}
 
-	async function refresh(ctx: ExtensionContext): Promise<void> {
-		if (refreshController || activeContext !== ctx || !activeProfile || !activeModel) return;
+	async function refresh(): Promise<RefreshResult> {
+		if (refreshController) return { status: "busy" };
+		const ctx = activeContext;
+		if (!ctx || !activeProfile || !activeModel) return { status: "inactive" };
 		const runGeneration = generation;
 		const profile = activeProfile;
 		const model = activeModel;
@@ -959,7 +967,7 @@ export default function piUsage(pi: ExtensionAPI) {
 			else if (profile.source.type === "codex") meters = await fetchCodexMeters(ctx.modelRegistry, model, controller.signal);
 			else if (profile.source.type === "new-api") meters = await fetchNewApiMeters(profile, profile.source, ctx.modelRegistry, model, controller.signal);
 			else meters = await fetchHttpMeters(profile, profile.source, ctx.modelRegistry, model, controller.signal);
-			if (!isCurrent()) return;
+			if (!isCurrent()) return { status: "inactive" };
 			activeMeters = meters;
 			lastUpdatedAt = Date.now();
 			lastError = undefined;
@@ -968,11 +976,14 @@ export default function piUsage(pi: ExtensionAPI) {
 				cache.entries[cacheKey(profile, model)] = { updatedAt: lastUpdatedAt, meters };
 				saveCache(cache);
 			}
+			return { status: "success" };
 		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
 			if (isCurrent()) {
-				lastError = error instanceof Error ? error.message : String(error);
+				lastError = message;
 				refreshFailed = true;
 			}
+			return { status: "error", error: message };
 		} finally {
 			if (refreshController === controller) refreshController = undefined;
 			if (isCurrent()) render(ctx);
@@ -1008,10 +1019,10 @@ export default function piUsage(pi: ExtensionAPI) {
 		activeModel = ctx.model;
 		if (profile.source.type !== "session") applyCached(profile, ctx.model);
 		render(ctx);
-		void refresh(ctx);
+		void refresh();
 		if (profile.source.type !== "session") {
 			refreshTimer = setInterval(
-				() => activeContext && void refresh(activeContext),
+				() => void refresh(),
 				config.refreshIntervalSeconds * 1_000,
 			);
 			refreshTimer.unref?.();
@@ -1026,7 +1037,7 @@ export default function piUsage(pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => stop());
 	pi.on("model_select", (_event, ctx) => start(ctx));
 	pi.on("message_end", (event, ctx) => {
-		if (event.message.role === "assistant" && activeProfile?.source.type === "session") void refresh(ctx);
+		if (event.message.role === "assistant" && activeProfile?.source.type === "session") void refresh();
 	});
 
 	pi.registerCommand("usage", {
@@ -1057,8 +1068,16 @@ export default function piUsage(pi: ExtensionAPI) {
 				ctx.ui.notify(`Usage profile: ${activeProfile?.id ?? "none"} · model: ${model} · config: ${configPath}${error}`, lastError ? "warning" : "info");
 				return;
 			}
-			await refresh(ctx);
-			if (lastError) ctx.ui.notify(lastError, "error");
+			const result = await refresh();
+			if (result.status === "success") {
+				ctx.ui.notify(`Usage refreshed: ${activeProfile?.label ?? "unknown"}.`, "info");
+			} else if (result.status === "error") {
+				ctx.ui.notify(`Usage refresh failed: ${result.error}`, "error");
+			} else if (result.status === "busy") {
+				ctx.ui.notify("Usage refresh already in progress.", "info");
+			} else {
+				ctx.ui.notify("No usage profile is active for the current model.", "warning");
+			}
 		},
 	});
 }
