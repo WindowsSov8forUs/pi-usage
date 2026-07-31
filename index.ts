@@ -4,6 +4,12 @@ import type {
 	ModelRegistry,
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
+import {
+	SettingsList,
+	truncateToWidth,
+	type SettingItem,
+	type SettingsListTheme,
+} from "@earendil-works/pi-tui";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -268,34 +274,46 @@ function defaultConfig(): UsageConfig {
 	};
 }
 
+function parseConfig(value: unknown): UsageConfig {
+	const root = record(value);
+	if (!root) throw new Error("root must be an object");
+	if (root.version !== undefined && root.version !== 1) throw new Error("only version 1 is supported");
+	const refresh = finiteNumber(root.refreshIntervalSeconds) ?? DEFAULT_REFRESH_SECONDS;
+	const barWidth = finiteNumber(root.barWidth) ?? DEFAULT_BAR_WIDTH;
+	const maxMeters = finiteNumber(root.maxMeters) ?? 2;
+	return {
+		version: 1,
+		refreshIntervalSeconds: Math.max(15, Math.min(3_600, refresh)),
+		barWidth: Math.max(4, Math.min(30, Math.trunc(barWidth))),
+		maxMeters: Math.max(1, Math.min(6, Math.trunc(maxMeters))),
+		disabledBuiltIns: stringArray(root.disabledBuiltIns),
+		providerModes: parseProviderModes(root.providerModes),
+		profiles: Array.isArray(root.profiles) ? root.profiles.map(parseProfile) : [],
+	};
+}
+
 function loadConfig(): { config: UsageConfig; path: string; error?: string } {
 	const path = CONFIG_PATH;
 	if (!existsSync(path)) return { config: defaultConfig(), path };
 	try {
-		const root = record(JSON.parse(readFileSync(path, "utf8")));
-		if (!root) throw new Error("root must be an object");
-		if (root.version !== undefined && root.version !== 1) throw new Error("only version 1 is supported");
-		const refresh = finiteNumber(root.refreshIntervalSeconds) ?? DEFAULT_REFRESH_SECONDS;
-		const barWidth = finiteNumber(root.barWidth) ?? DEFAULT_BAR_WIDTH;
-		const maxMeters = finiteNumber(root.maxMeters) ?? 2;
-		return {
-			path,
-			config: {
-				version: 1,
-				refreshIntervalSeconds: Math.max(15, Math.min(3_600, refresh)),
-				barWidth: Math.max(4, Math.min(30, Math.trunc(barWidth))),
-				maxMeters: Math.max(1, Math.min(6, Math.trunc(maxMeters))),
-				disabledBuiltIns: stringArray(root.disabledBuiltIns),
-				providerModes: parseProviderModes(root.providerModes),
-				profiles: Array.isArray(root.profiles) ? root.profiles.map(parseProfile) : [],
-			},
-		};
+		return { config: parseConfig(JSON.parse(readFileSync(path, "utf8"))), path };
 	} catch (error) {
 		return {
 			config: defaultConfig(),
 			path,
 			error: `Invalid ${path}: ${error instanceof Error ? error.message : String(error)}`,
 		};
+	}
+}
+
+function saveConfig(config: UsageConfig): string | undefined {
+	try {
+		const temporaryPath = `${CONFIG_PATH}.${process.pid}.tmp`;
+		writeFileSync(temporaryPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+		renameSync(temporaryPath, CONFIG_PATH);
+		return undefined;
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
 	}
 }
 
@@ -1033,6 +1051,125 @@ export default function piUsage(pi: ExtensionAPI) {
 		}
 	}
 
+	async function showConfiguration(ctx: ExtensionContext): Promise<void> {
+		if (ctx.mode !== "tui") {
+			ctx.ui.notify("The pi-usage configuration interface requires TUI mode.", "error");
+			return;
+		}
+		let draft = parseConfig(JSON.parse(JSON.stringify(config)));
+		const provider = ctx.model?.provider;
+		let activePage: "general" | "siteTypes" = "general";
+		const settingTheme = (theme: ExtensionContext["ui"]["theme"]): SettingsListTheme => ({
+			label: (text, selected) => selected ? theme.fg("accent", text) : text,
+			value: (text, selected) => selected ? theme.fg("accent", text) : theme.fg("muted", text),
+			description: (text) => theme.fg("dim", text),
+			cursor: theme.fg("accent", "→ "),
+			hint: (text) => theme.fg("dim", text),
+		});
+		const numericValues = (values: number[], current: number, suffix = "") =>
+			[...new Set([...values, current])]
+				.sort((left, right) => left - right)
+				.map((value) => `${value}${suffix}`);
+		const buildGeneralSettings = (): SettingItem[] => [
+			{
+				id: "refreshIntervalSeconds",
+				label: "Refresh interval",
+				currentValue: `${draft.refreshIntervalSeconds}s`,
+				values: numericValues([15, 30, 60, 120, 300, 600, 1_800, 3_600], draft.refreshIntervalSeconds, "s"),
+				description: "How often remote usage profiles refresh automatically.",
+			},
+			{
+				id: "barWidth",
+				label: "Usage bar width",
+				currentValue: String(draft.barWidth),
+				values: numericValues([4, 6, 8, 10, 12, 16, 20, 24, 30], draft.barWidth),
+				description: "Width of each usage progress bar.",
+			},
+			{
+				id: "maxMeters",
+				label: "Maximum meters",
+				currentValue: String(draft.maxMeters),
+				values: ["1", "2", "3", "4", "5", "6"],
+				description: "Maximum meters shown for metered profiles.",
+			},
+		];
+		const buildSiteTypeSettings = (): SettingItem[] => provider ? [{
+			id: "currentProviderSiteType",
+			label: provider,
+			currentValue: draft.providerModes["new-api"].includes(provider) ? "New API" : "automatic",
+			values: ["automatic", "New API"],
+			description: "Configure which usage site framework this provider belongs to.",
+		}] : [];
+		const buildSettings = () => activePage === "general" ? buildGeneralSettings() : buildSiteTypeSettings();
+
+		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+			let settingsList: SettingsList;
+
+			const applyDraft = (next: UsageConfig): boolean => {
+				const error = saveConfig(next);
+				if (error) {
+					ctx.ui.notify(`Failed to save ${CONFIG_PATH}: ${error}`, "error");
+					return false;
+				}
+				draft = next;
+				start(ctx, true);
+				return true;
+			};
+			const activatePage = (page: "general" | "siteTypes") => {
+				activePage = page;
+				settingsList = createSettingsList();
+				tui.requestRender(true);
+			};
+			const createSettingsList = () => new SettingsList(
+				buildSettings(),
+				10,
+				settingTheme(theme),
+				(id, value) => {
+					const previousValue = buildSettings().find((item) => item.id === id)?.currentValue ?? value;
+					const next = parseConfig(JSON.parse(JSON.stringify(draft)));
+					if (id === "refreshIntervalSeconds") next.refreshIntervalSeconds = Number.parseInt(value, 10);
+					else if (id === "barWidth") next.barWidth = Number(value);
+					else if (id === "maxMeters") next.maxMeters = Number(value);
+					else if (id === "currentProviderSiteType" && provider) {
+						next.providerModes["new-api"] = value === "New API"
+							? [...new Set([...next.providerModes["new-api"], provider])]
+							: next.providerModes["new-api"].filter((item) => item !== provider);
+					} else return;
+					if (!applyDraft(parseConfig(next))) settingsList.updateValue(id, previousValue);
+					tui.requestRender();
+				},
+				() => done(undefined),
+			);
+
+			settingsList = createSettingsList();
+			return {
+				render: (width: number) => {
+					const settingsLines = settingsList.render(width).map((line) => line.replace("Esc to cancel", "Esc to close"));
+					const tabs = activePage === "general"
+						? `  ${theme.bold("General")}  ${theme.fg("dim", "/")}  ${theme.fg("dim", "Site Types")}`
+						: `  ${theme.fg("dim", "General")}  ${theme.fg("dim", "/")}  ${theme.bold("Site Types")}`;
+					return [
+						theme.fg("accent", "─".repeat(Math.max(0, width))),
+						tabs,
+						theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
+						"",
+						...settingsLines,
+						theme.fg("accent", "─".repeat(Math.max(0, width))),
+					].map((line) => truncateToWidth(line, width, ""));
+				},
+				invalidate: () => settingsList.invalidate(),
+				handleInput: (data: string) => {
+					if (data === "\t") {
+						activatePage(activePage === "general" ? "siteTypes" : "general");
+						return;
+					}
+					settingsList.handleInput?.(data);
+					tui.requestRender();
+				},
+			};
+		});
+	}
+
 	pi.on("session_start", (_event, ctx) => start(ctx));
 	pi.on("session_shutdown", () => stop());
 	pi.on("model_select", (_event, ctx) => start(ctx));
@@ -1041,7 +1178,7 @@ export default function piUsage(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("usage", {
-		description: "Refresh, reload, or inspect the adaptive usage display",
+		description: "Configure, refresh, reload, or inspect the adaptive usage display",
 		getArgumentCompletions: (prefix) => {
 			const normalized = prefix.trim().toLowerCase();
 			const actions = ["refresh", "reload", "status"];
@@ -1050,6 +1187,10 @@ export default function piUsage(pi: ExtensionAPI) {
 		},
 		handler: async (args, ctx) => {
 			const action = args.trim().toLowerCase();
+			if (!action) {
+				await showConfiguration(ctx);
+				return;
+			}
 			if (action !== "refresh" && action !== "reload" && action !== "status") {
 				ctx.ui.notify("Usage: /usage [refresh|reload|status]", "error");
 				return;

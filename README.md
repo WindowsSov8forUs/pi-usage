@@ -43,15 +43,16 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
 ~/.pi/agent/pi-usage.json
 ```
 
-该文件是可选的；不存在时扩展直接使用内置默认值。需要配置第三方 provider 或自定义 profile 时，按下方示例创建该文件。配置始终放在 Pi 的用户目录，而不是 Git package clone 内，可避免 `pi update` 或切换 Release tag 时被 Git 重置。修改后运行：
+该文件是可选的；不存在时扩展直接使用内置默认值。运行单独的 `/usage` 可打开配置界面；也可按下方示例手动创建文件来配置第三方 provider 或自定义 profile。配置始终放在 Pi 的用户目录，而不是 Git package clone 内，可避免 `pi update` 或切换 Release tag 时被 Git 重置。手动修改后运行：
 
 ```text
 /usage reload
 ```
 
-其他命令：
+命令：
 
 ```text
+/usage
 /usage refresh
 /usage reload
 /usage status
@@ -59,11 +60,12 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
 
 | 命令 | 功能 |
 |---|---|
+| `/usage` | 在 TUI 中打开类似 `/codex` 的单屏设置界面，分为 `General` 和 `Site Types` 两页。可用 Tab 切换页面、方向键和 Enter/Space 修改设置；每次修改都会立即保存并应用。 |
 | `/usage refresh` | 重新查询当前已匹配 profile 的远程额度，或重新计算本地 session 指标；不重新读取配置文件。成功后更新独立 usage 行并弹出成功提示；失败时保留最后成功缓存并弹出具体错误。后台刷新尚未结束或当前没有活动 profile 时也会给出明确提示。 |
 | `/usage reload` | 重新读取 `~/.pi/agent/pi-usage.json`，按当前模型重新选择 profile，应用缓存并在后台发起新一次刷新；同时重建刷新和倒计时定时器。 |
 | `/usage status` | 不发送 usage 请求；显示当前 profile ID、当前 `provider/model`、实际配置路径，以及最近一次刷新错误（如有）。 |
 
-输入 `/usage ` 后，Pi TUI 会提供 `refresh`、`reload`、`status` 三个参数候选。无参数 `/usage` 不执行刷新；它和其他非法参数一样只显示 `/usage [refresh|reload|status]` 用法错误。
+输入 `/usage ` 后，Pi TUI 会提供 `refresh`、`reload`、`status` 三个参数候选。配置界面仅在 TUI 模式可用；其他非法参数仍显示 `/usage [refresh|reload|status]` 用法错误。
 
 ## 顶层配置
 
@@ -74,7 +76,7 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
   "barWidth": 12,
   "maxMeters": 2,
   "providerModes": {
-    "new-api": ["soruxgpt-ai"]
+    "new-api": []
   },
   "disabledBuiltIns": [],
   "profiles": []
@@ -84,7 +86,7 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
 - `refreshIntervalSeconds`：远程接口刷新间隔，限制为 15～3600 秒。
 - `barWidth`：进度条宽度，限制为 4～30。
 - `maxMeters`：按量计费 profile 最多同时显示 1～6 个指标；订阅 profile 会显示接口返回的全部有效限额窗口，不受此项截断。
-- `providerModes`：第三方站点配置，只需把 Pi `models.json` 中的 provider 名称填入对应模式。
+- `providerModes`：第三方站点类型映射，把 Pi `models.json` 中的 provider 名称映射到对应站点框架，例如 `my-new-api-provider` → `new-api`。
 - `disabledBuiltIns`：可填 `codex`、`openrouter`、`deepseek`、`session`。
 - `profiles`：可选的高级自定义适配；通常保持空数组。
 
@@ -95,7 +97,7 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
 ```json
 {
   "providerModes": {
-    "new-api": ["soruxgpt-ai", "company-new-api"]
+    "new-api": ["my-new-api-provider", "company-new-api"]
   }
 }
 ```

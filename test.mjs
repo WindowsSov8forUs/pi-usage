@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -159,6 +159,7 @@ try {
   const statuses = new Map();
   const widgets = new Map();
   const notifications = [];
+  const customInteractions = [];
   const pi = {
     on(name, handler) {
       const list = handlers.get(name) ?? [];
@@ -205,7 +206,18 @@ try {
     sessionManager: { getBranch: () => entries },
     getContextUsage: () => ({ tokens: 250, contextWindow: 1000, percent: 25 }),
     ui: {
-      theme: { fg: (_color, text) => text },
+      theme: {
+        fg: (_color, text) => text,
+        bold: (text) => text,
+      },
+      custom: async (factory) => {
+        const interaction = customInteractions.shift();
+        assert.ok(interaction, "Unexpected custom UI dialog");
+        return new Promise((resolve) => {
+          const component = factory({ requestRender: () => {} }, ctx.ui.theme, {}, resolve);
+          interaction(component);
+        });
+      },
       setStatus: (key, value) => statuses.set(key, value),
       setWidget: (key, value, options) => {
         if (value === undefined) widgets.delete(key);
@@ -221,7 +233,28 @@ try {
   assert.equal(widgets.get("pi-usage")?.options?.placement, "belowEditor");
   assert.equal(statuses.get("pi-usage"), undefined);
 
+  customInteractions.push((component) => {
+    const rendered = component.render(100).join("\n");
+    assert.doesNotMatch(rendered, /pi-usage settings/);
+    assert.match(rendered, /Refresh interval/);
+    assert.match(rendered, /General.*Site Types/);
+    assert.match(rendered, /Esc to close/);
+    assert.doesNotMatch(rendered, /Esc to cancel|Changes save and apply immediately|pi-usage\.json|Edit complete JSON|Reset to defaults/);
+    component.handleInput("\r");
+    component.handleInput("\r");
+    component.handleInput("\t");
+    const siteTypeRendered = component.render(100).join("\n");
+    assert.match(siteTypeRendered, /\bacme\b/);
+    component.handleInput("\r");
+    component.handleInput("\x1b");
+  });
   await commands.get("usage").handler("", ctx);
+  const savedConfig = JSON.parse(readFileSync(join(stateDir, "pi-usage.json"), "utf8"));
+  assert.equal(savedConfig.refreshIntervalSeconds, 300);
+  assert.deepEqual(savedConfig.providerModes["new-api"], ["acme"]);
+  assert.equal(savedConfig.profiles[0].id, "custom-session");
+
+  await commands.get("usage").handler("unknown", ctx);
   assert.deepEqual(notifications.at(-1), {
     message: "Usage: /usage [refresh|reload|status]",
     level: "error",
