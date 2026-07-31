@@ -43,7 +43,7 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
 ~/.pi/agent/pi-usage.json
 ```
 
-首次自定义时可复制仓库中的 `pi-usage.json` 到上述路径。把配置放在 Pi 的用户目录，而不是 Git package clone 内，可避免 `pi update` 或切换 Release tag 时被 Git 重置。为兼容旧的手动安装，如果用户目录中没有配置，扩展仍会回退读取扩展目录旁的 `pi-usage.json`。修改后运行：
+该文件是可选的；不存在时扩展直接使用内置默认值。需要配置第三方 provider 或自定义 profile 时，按下方示例创建该文件。配置始终放在 Pi 的用户目录，而不是 Git package clone 内，可避免 `pi update` 或切换 Release tag 时被 Git 重置。修改后运行：
 
 ```text
 /usage reload
@@ -60,7 +60,7 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
 | 命令 | 功能 |
 |---|---|
 | `/usage refresh` | 重新查询当前已匹配 profile 的远程额度，或重新计算本地 session 指标；不重新读取配置文件。成功后直接更新独立 usage 行；失败时保留最后成功缓存并弹出具体错误。 |
-| `/usage reload` | 重新读取 `~/.pi/agent/pi-usage.json`（或兼容路径），按当前模型重新选择 profile，应用缓存并在后台发起新一次刷新；同时重建刷新和倒计时定时器。 |
+| `/usage reload` | 重新读取 `~/.pi/agent/pi-usage.json`，按当前模型重新选择 profile，应用缓存并在后台发起新一次刷新；同时重建刷新和倒计时定时器。 |
 | `/usage status` | 不发送 usage 请求；显示当前 profile ID、当前 `provider/model`、实际配置路径，以及最近一次刷新错误（如有）。 |
 
 输入 `/usage ` 后，Pi TUI 会提供 `refresh`、`reload`、`status` 三个参数候选。无参数 `/usage` 不执行刷新；它和其他非法参数一样只显示 `/usage [refresh|reload|status]` 用法错误。

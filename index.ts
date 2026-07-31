@@ -7,7 +7,6 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
 	calculateSessionSpend,
 	isNormalizedMeter,
@@ -24,7 +23,6 @@ const STATUS_KEY = "pi-usage";
 const DEFAULT_REFRESH_SECONDS = 60;
 const DEFAULT_BAR_WIDTH = 12;
 const CONFIG_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-const BUNDLED_CONFIG_PATH = fileURLToPath(new URL("./pi-usage.json", import.meta.url));
 const CONFIG_PATH = process.env.PI_USAGE_CONFIG_PATH ?? join(CONFIG_DIR, "pi-usage.json");
 const CACHE_PATH = join(CONFIG_DIR, "pi-usage-cache.json");
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
@@ -265,11 +263,7 @@ function defaultConfig(): UsageConfig {
 }
 
 function loadConfig(): { config: UsageConfig; path: string; error?: string } {
-	const path = existsSync(CONFIG_PATH)
-		? CONFIG_PATH
-		: process.env.PI_USAGE_CONFIG_PATH === undefined && existsSync(BUNDLED_CONFIG_PATH)
-			? BUNDLED_CONFIG_PATH
-			: CONFIG_PATH;
+	const path = CONFIG_PATH;
 	if (!existsSync(path)) return { config: defaultConfig(), path };
 	try {
 		const root = record(JSON.parse(readFileSync(path, "utf8")));
