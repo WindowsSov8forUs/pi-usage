@@ -269,12 +269,12 @@ URL、header 和 JSON body 支持：
 
 ## 发布 Release
 
-仓库包含 `.github/workflows/release.yml`，通过 GitHub Actions 手动创建 tag 和 Release：
+仓库包含 `.github/workflows/release.yml`，在 GitHub Release 发布后自动验证该 Release：
 
 1. 修改 `package.json` 中的 `version`，提交并推送到默认分支。
-2. 在 GitHub 仓库的 **Actions → Release → Run workflow** 中输入同一个版本号，例如 `0.1.0`（不要带 `v`）。
-3. Workflow 使用 Node.js 22 安装依赖并运行测试，验证输入版本与 `package.json` 一致。
-4. 测试通过后创建 `v0.1.0` tag 和 GitHub Release，并在 Release notes 与 job summary 中生成该仓库可直接复制的 `pi install` 命令。
+2. 在 GitHub 仓库中基于对应提交创建并发布 `v<version>` Release，例如 `v0.1.0`。
+3. `release.published` 触发 Workflow；它 checkout Release tag，使用 Node.js 22 安装依赖并运行测试，再验证 tag 与 `package.json` 版本一致。
+4. 验证通过后，Workflow 将该 tag 的固定版本 `pi install` 命令写入现有 Release notes 和 job summary；它不会创建 tag 或 Release。
 
 Pi 的 Git package 安装会 clone 仓库、checkout 指定 tag、执行 `npm install`，再根据 `package.json` 的 `pi.extensions` 加载 `index.ts`；因此不需要额外上传压缩包或编译产物。
 

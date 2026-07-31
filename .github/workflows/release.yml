@@ -1,12 +1,8 @@
 name: Release
 
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Release version matching package.json (for example: 0.1.0)"
-        required: true
-        type: string
+  release:
+    types: [published]
 
 permissions:
   contents: write
@@ -15,10 +11,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
+      - name: Check out released tag
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -34,46 +31,54 @@ jobs:
       - name: Validate release version
         id: release
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Invalid semantic version: $RELEASE_VERSION" >&2
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Release tag must use v<semver>: $RELEASE_TAG" >&2
             exit 1
           fi
 
+          RELEASE_VERSION="${RELEASE_TAG#v}"
           PACKAGE_VERSION="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
           if [[ "$RELEASE_VERSION" != "$PACKAGE_VERSION" ]]; then
-            echo "Input version $RELEASE_VERSION does not match package.json version $PACKAGE_VERSION" >&2
+            echo "Release tag $RELEASE_TAG does not match package.json version $PACKAGE_VERSION" >&2
             exit 1
           fi
 
-          TAG="v${RELEASE_VERSION}"
-          if git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
-            echo "Tag ${TAG} already exists" >&2
-            exit 1
-          fi
+          echo "tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
 
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub Release
+      - name: Update GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_ID: ${{ github.event.release.id }}
         shell: bash
         run: |
           set -euo pipefail
           INSTALL_COMMAND="pi install git:github.com/${GITHUB_REPOSITORY}@${TAG}"
-          printf '## Install\n\n`%s`\n\nThis pins Pi to the released tag.\n' "$INSTALL_COMMAND" > release-notes.md
-          gh release create "$TAG" \
-            --target "$GITHUB_SHA" \
-            --title "$TAG" \
-            --generate-notes \
-            --notes-file release-notes.md
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq '.body // ""' > current-notes.md
+          INSTALL_COMMAND="$INSTALL_COMMAND" node <<'NODE'
+          const fs = require("node:fs");
+          const start = "<!-- pi-install-command:start -->";
+          const end = "<!-- pi-install-command:end -->";
+          let body = fs.readFileSync("current-notes.md", "utf8");
+          const startIndex = body.indexOf(start);
+          if (startIndex >= 0) {
+            const endIndex = body.indexOf(end, startIndex);
+            body = endIndex >= 0
+              ? body.slice(0, startIndex) + body.slice(endIndex + end.length)
+              : body.slice(0, startIndex);
+          }
+          body = body.trim();
+          const block = `${start}\n## Install\n\n\`${process.env.INSTALL_COMMAND}\`\n\nThis pins Pi to the released tag.\n${end}`;
+          fs.writeFileSync("release-notes.md", `${body}${body ? "\n\n" : ""}${block}\n`);
+          NODE
+          gh release edit "$TAG" --notes-file release-notes.md
 
           {
-            echo "## Released ${TAG}"
+            echo "## Validated ${TAG}"
             echo
             echo "\`$INSTALL_COMMAND\`"
           } >> "$GITHUB_STEP_SUMMARY"
