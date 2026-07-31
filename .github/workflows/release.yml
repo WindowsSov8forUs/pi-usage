@@ -72,7 +72,7 @@ jobs:
               : body.slice(0, startIndex);
           }
           body = body.trim();
-          const block = `${start}\n## Install\n\n\`${process.env.INSTALL_COMMAND}\`\n\nThis pins Pi to the released tag.\n${end}`;
+          const block = `${start}\n## Install\n\n\`${process.env.INSTALL_COMMAND}\`\n${end}`;
           fs.writeFileSync("release-notes.md", `${body}${body ? "\n\n" : ""}${block}\n`);
           NODE
           gh release edit "$TAG" --notes-file release-notes.md
