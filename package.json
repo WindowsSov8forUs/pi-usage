@@ -1,0 +1,25 @@
+{
+  "name": "pi-usage",
+  "version": "0.1.0",
+  "description": "Show provider quota, balance, budget, and session usage in Pi.",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "usage"
+  ],
+  "scripts": {
+    "test": "node --experimental-strip-types test.mjs"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

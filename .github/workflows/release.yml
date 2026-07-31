@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version matching package.json (for example: 0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm install --ignore-scripts
+
+      - name: Run tests
+        run: npm test
+
+      - name: Validate release version
+        id: release
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid semantic version: $RELEASE_VERSION" >&2
+            exit 1
+          fi
+
+          PACKAGE_VERSION="$(node -p "JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version")"
+          if [[ "$RELEASE_VERSION" != "$PACKAGE_VERSION" ]]; then
+            echo "Input version $RELEASE_VERSION does not match package.json version $PACKAGE_VERSION" >&2
+            exit 1
+          fi
+
+          TAG="v${RELEASE_VERSION}"
+          if git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists" >&2
+            exit 1
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          INSTALL_COMMAND="pi install git:github.com/${GITHUB_REPOSITORY}@${TAG}"
+          printf '## Install\n\n`%s`\n\nThis pins Pi to the released tag.\n' "$INSTALL_COMMAND" > release-notes.md
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --title "$TAG" \
+            --generate-notes \
+            --notes-file release-notes.md
+
+          {
+            echo "## Released ${TAG}"
+            echo
+            echo "\`$INSTALL_COMMAND\`"
+          } >> "$GITHUB_STEP_SUMMARY"
