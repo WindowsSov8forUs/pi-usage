@@ -33,7 +33,7 @@ pi -e git:github.com/OWNER/pi-usage@v0.1.0
 
 OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因此即使在 Pi 中使用了自定义 provider 名称也无需配置。第三方 New API/One API 站点才需要在 `providerModes` 中声明 provider 名称。
 
-扩展直接使用 Pi 当前选中模型导出的 provider 名称、模型名、API 类型、`baseUrl`，以及 Pi 已解析的 API Key/headers。三个内置适配均从这些运行时元数据识别站点并构造账户 usage 请求，只在扩展中保留各站点特有的相对路径和响应解析。模型切换时自动切换 usage 模式，不需要重复填写模型、基础 URL 或密钥。
+扩展直接使用 Pi 当前选中模型导出的 provider ID、provider 显示名、模型名、API 类型、`baseUrl`，以及 Pi 已解析的 API Key/headers。三个内置适配均从这些运行时元数据识别站点、渲染名称并构造账户 usage 请求，只在扩展中保留各站点特有的相对路径和响应解析。模型切换时自动切换 usage 模式，不需要重复填写模型、基础 URL 或密钥。
 
 ## 配置文件
 

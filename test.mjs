@@ -222,6 +222,11 @@ try {
     modelRegistry: {
       getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-model-key", headers: {} }),
       getProviderAuth: async () => ({ auth: { apiKey: "test-model-key" }, env: {} }),
+      getProviderDisplayName: (provider) => ({
+        "renamed-codex": "OpenAI Codex",
+        "renamed-openrouter": "OpenRouter",
+        "renamed-deepseek": "DeepSeek",
+      })[provider] ?? provider,
     },
     sessionManager: { getBranch: () => entries },
     getContextUsage: () => ({ tokens: 250, contextWindow: 1000, percent: 25 }),
@@ -432,7 +437,8 @@ try {
   await commands.get("usage").handler("reload", ctx);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(officialRequest, "https://chatgpt.example/backend-api/wham/usage");
-  assert.match(widgets.get("pi-usage")?.lines.join("\n"), /^Codex • 5h ─+ 75%/);
+  assert.match(widgets.get("pi-usage")?.lines.join("\n"), /^OpenAI Codex • 5h ─+ 75%/);
+  assert.doesNotMatch(widgets.get("pi-usage")?.lines.join("\n"), /OpenAI Codex • Codex/);
 
   model.provider = "renamed-openrouter";
   model.api = "openai-completions";

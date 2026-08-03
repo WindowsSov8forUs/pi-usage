@@ -374,6 +374,16 @@ function findProfile(config: UsageConfig, model: Model<Api>): UsageProfile | und
 	return effectiveProfiles(config).find((profile) => matchesProfile(profile.match, modelLike(model)));
 }
 
+function withProviderDisplayName(profile: UsageProfile, registry: ModelRegistry, model: Model<Api>): UsageProfile {
+	const builtInProviderProfile = BUILT_IN_PROFILES.includes(profile) && profile.source.type !== "session";
+	return builtInProviderProfile ? { ...profile, label: registry.getProviderDisplayName(model.provider) } : profile;
+}
+
+function metersForDisplay(profile: UsageProfile, meters: NormalizedMeter[]): NormalizedMeter[] {
+	if (profile.source.type !== "codex") return meters;
+	return meters.map((meter) => meter.label === "Codex" ? { ...meter, label: profile.label } : meter);
+}
+
 function cacheKey(profile: UsageProfile, model: Model<Api>): string {
 	return `${profile.id}:${model.provider}:${model.id}`;
 }
@@ -982,7 +992,7 @@ export default function piUsage(pi: ExtensionAPI) {
 
 	function applyCached(profile: UsageProfile, model: Model<Api>): void {
 		const saved = cache.entries[cacheKey(profile, model)];
-		activeMeters = saved?.meters ?? [];
+		activeMeters = metersForDisplay(profile, saved?.meters ?? []);
 		lastUpdatedAt = saved?.updatedAt;
 	}
 
@@ -1003,7 +1013,7 @@ export default function piUsage(pi: ExtensionAPI) {
 			else if (profile.source.type === "new-api") meters = await fetchNewApiMeters(profile, profile.source, ctx.modelRegistry, model, controller.signal);
 			else meters = await fetchHttpMeters(profile, profile.source, ctx.modelRegistry, model, controller.signal);
 			if (!isCurrent()) return { status: "inactive" };
-			activeMeters = meters;
+			activeMeters = metersForDisplay(profile, meters);
 			lastUpdatedAt = Date.now();
 			lastError = undefined;
 			refreshFailed = false;
@@ -1047,8 +1057,9 @@ export default function piUsage(pi: ExtensionAPI) {
 		stop();
 		if (ctx.mode !== "tui" || !ctx.model) return;
 		if (reloadConfig) loadConfiguration(ctx);
-		const profile = findProfile(config, ctx.model);
-		if (!profile) return;
+		const matchedProfile = findProfile(config, ctx.model);
+		if (!matchedProfile) return;
+		const profile = withProviderDisplayName(matchedProfile, ctx.modelRegistry, ctx.model);
 		activeContext = ctx;
 		activeProfile = profile;
 		activeModel = ctx.model;
@@ -1075,6 +1086,7 @@ export default function piUsage(pi: ExtensionAPI) {
 		}
 		let draft = parseConfig(JSON.parse(JSON.stringify(config)));
 		const provider = ctx.model?.provider;
+		const providerDisplayName = provider ? ctx.modelRegistry.getProviderDisplayName(provider) : undefined;
 		let activePage: "general" | "siteTypes" = "general";
 		const settingTheme = (theme: ExtensionContext["ui"]["theme"]): SettingsListTheme => ({
 			label: (text, selected) => selected ? theme.fg("accent", text) : text,
@@ -1112,7 +1124,7 @@ export default function piUsage(pi: ExtensionAPI) {
 		];
 		const buildSiteTypeSettings = (): SettingItem[] => provider ? [{
 			id: "currentProviderSiteType",
-			label: provider,
+			label: providerDisplayName ?? provider,
 			currentValue: draft.providerModes["new-api"].includes(provider) ? "New API" : "automatic",
 			values: ["automatic", "New API"],
 			description: "Configure which usage site framework this provider belongs to.",
