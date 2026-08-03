@@ -1,6 +1,6 @@
 # pi-usage
 
-根据 Pi 当前选中的模型自动显示订阅额度、账户余额、预算消耗或会话上下文/成本。
+根据 Pi 当前选中的模型自动显示订阅额度、账户余额、预算消耗或会话上下文/成本，并统计各模型的历史 token 使用趋势。
 
 额度信息通过 `belowEditor` widget 独占输入框下方一行，不与其他扩展的 footer status 挤在同一行。
 
@@ -43,7 +43,7 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
 ~/.pi/agent/pi-usage.json
 ```
 
-该文件是可选的；不存在时扩展直接使用内置默认值。运行单独的 `/usage` 可打开配置界面；也可按下方示例手动创建文件来配置第三方 provider 或自定义 profile。配置始终放在 Pi 的用户目录，而不是 Git package clone 内，可避免 `pi update` 或切换 Release tag 时被 Git 重置。手动修改后运行：
+该文件是可选的；不存在时扩展直接使用内置默认值。运行单独的 `/usage` 可打开包含 `General`、`Site Types` 和 `Stats` 的面板；也可按下方示例手动创建文件来配置第三方 provider 或自定义 profile。配置始终放在 Pi 的用户目录，而不是 Git package clone 内，可避免 `pi update` 或切换 Release tag 时被 Git 重置。手动修改后运行：
 
 ```text
 /usage reload
@@ -60,12 +60,20 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
 
 | 命令 | 功能 |
 |---|---|
-| `/usage` | 在 TUI 中打开类似 `/codex` 的单屏设置界面，分为 `General` 和 `Site Types` 两页。可用 Tab 切换页面、方向键和 Enter/Space 修改设置；每次修改都会立即保存并应用。 |
+| `/usage` | 在 TUI 中打开单屏面板，包含 `General`、`Site Types` 和 `Stats` 三页。可用 Tab 切换页面；设置页使用方向键和 Enter/Space 修改值，每次修改都会立即保存并应用。 |
 | `/usage refresh` | 重新查询当前已匹配 profile 的远程额度，或重新计算本地 session 指标；不重新读取配置文件。成功后更新独立 usage 行并弹出成功提示；失败时保留最后成功缓存并弹出具体错误。后台刷新尚未结束或当前没有活动 profile 时也会给出明确提示。 |
 | `/usage reload` | 重新读取 `~/.pi/agent/pi-usage.json`，按当前模型重新选择 profile，应用缓存并在后台发起新一次刷新；同时重建刷新和倒计时定时器。 |
-| `/usage status` | 不发送 usage 请求；显示当前 profile ID、当前 `provider/model`、实际配置路径，以及最近一次刷新错误（如有）。 |
+| `/usage status` | 直接打开同一面板并切换到 `Stats` 页，不发送 provider usage 请求。 |
 
-输入 `/usage ` 后，Pi TUI 会提供 `refresh`、`reload`、`status` 三个参数候选。配置界面仅在 TUI 模式可用；其他非法参数仍显示 `/usage [refresh|reload|status]` 用法错误。
+输入 `/usage ` 后，Pi TUI 会提供 `refresh`、`reload`、`status` 三个参数候选。面板仅在 TUI 模式可用；其他非法参数仍显示 `/usage [refresh|reload|status]` 用法错误。
+
+## 模型使用统计
+
+`Stats` 从 `~/.pi/agent/sessions` 下的 Pi session JSONL 中读取 assistant message 已记录的 `provider`、`model`、时间及 usage，在本地按自然日聚合，不会请求供应商账户接口，也不会保存另一份聊天内容或统计历史。当前尚未落盘的 session 会直接从 Pi 的 session manager 合并进去；fork/clone 中复制的相同记录会去重。首次扫描完成前只显示加载状态，避免先渲染当前 session 的局部趋势再跳到全量数据；结果会在内存中缓存五分钟，新完成的 assistant message 会立即合并。
+
+图表使用彩色终端箱线字符绘制 `Tokens per Day` 阶梯线，并显示模型在所选时间范围内的占比、Input、Output 和非零 Cache token。最多绘制用量最高的六个模型，避免图表与详情超出普通终端高度。使用 `←/→` 在 `All time`、`Last 7 days` 和 `Last 30 days` 之间切换，Tab 切换页面，Escape 关闭。
+
+这里的模型 token 趋势与底部 provider 额度含义不同：趋势来自实际 Pi 对话消息；Codex quota、OpenRouter Key 余额、DeepSeek 余额和 New API 账户余额仍是 provider/账户级指标，不会错误归因到刷新时选中的模型。
 
 ## 顶层配置
 

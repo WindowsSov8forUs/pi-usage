@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -108,12 +108,114 @@ try {
   }), true);
   assert.equal(matchesProfile({ models: ["lite-*"] }, { provider: "acme", id: "pro-1" }), false);
 
+  const statsNow = new Date(2025, 6, 27, 12).getTime();
   const entries = [
-    { type: "message", message: { role: "assistant", provider: "acme", model: "pro-1", usage: { cost: { total: 0.125 } } } },
-    { type: "message", message: { role: "assistant", provider: "acme", model: "other", usage: { cost: { total: 9 } } } },
+    {
+      type: "message",
+      timestamp: new Date(statsNow - 86_400_000).toISOString(),
+      message: {
+        role: "assistant",
+        provider: "acme",
+        model: "pro-1",
+        timestamp: statsNow - 86_400_000,
+        usage: { input: 127_400, output: 5_100_000, cacheRead: 800_000, cacheWrite: 0, totalTokens: 6_027_400, cost: { total: 0.125 } },
+      },
+    },
+    {
+      type: "message",
+      timestamp: new Date(statsNow).toISOString(),
+      message: {
+        role: "assistant",
+        provider: "acme",
+        model: "other",
+        timestamp: statsNow,
+        usage: { input: 94_100, output: 1_800_000, cacheRead: 0, cacheWrite: 0, totalTokens: 1_894_100, cost: { total: 9 } },
+      },
+    },
     { type: "message", message: { role: "user" } },
   ];
   assert.equal(calculateSessionSpend(entries, { provider: "acme", id: "pro-1" }), 0.125);
+
+  const {
+    extractUsageSamples,
+    loadHistoricalUsageSamples,
+    mergeUsageSamples,
+    renderUsageStats,
+    summarizeUsage,
+  } = await import("./stats.ts");
+  const currentSamples = extractUsageSamples(entries);
+  assert.equal(currentSamples.length, 2);
+  const allStatistics = summarizeUsage(currentSamples, "all", statsNow + 1);
+  assert.equal(allStatistics.models.length, 2);
+  assert.equal(allStatistics.models[0].key, "acme/pro-1");
+  assert.equal(allStatistics.models[0].tokens, 5_227_400);
+  assert.equal(allStatistics.models[0].cache, 800_000);
+  assert.equal(allStatistics.totalTokens, 7_121_500);
+  assert.equal(summarizeUsage(currentSamples, "7d", statsNow + 1).dateKeys.length, 7);
+
+  const historyDir = join(stateDir, "sessions", "--test--");
+  mkdirSync(historyDir, { recursive: true });
+  const historicalEntry = {
+    type: "message",
+    timestamp: new Date(statsNow).toISOString(),
+    message: {
+      role: "assistant",
+      provider: "other-provider",
+      model: "deepseek-v4-pro",
+      timestamp: statsNow,
+      usage: { input: 1_700_000, output: 52_200, cacheRead: 0, cacheWrite: 0, totalTokens: 1_752_200, cost: { total: 1 } },
+    },
+  };
+  writeFileSync(join(historyDir, "usage.jsonl"), [
+    JSON.stringify({ type: "session", version: 3, id: "test", timestamp: new Date(statsNow).toISOString(), cwd: stateDir }),
+    JSON.stringify(entries[0]),
+    JSON.stringify(historicalEntry),
+  ].join("\n"), "utf8");
+  const historicalSamples = await loadHistoricalUsageSamples(join(stateDir, "sessions"));
+  assert.equal(historicalSamples.length, 2);
+  assert.equal(mergeUsageSamples(currentSamples, historicalSamples).length, 3);
+
+  const chart = renderUsageStats({
+    width: 90,
+    height: 9,
+    theme: { fg: (_color, text) => text, bold: (text) => text },
+    statistics: summarizeUsage(mergeUsageSamples(currentSamples, historicalSamples), "all", statsNow + 1),
+    labels: new Map([
+      ["acme/pro-1", "Pro 1"],
+      ["acme/other", "Fable 5"],
+      ["other-provider/deepseek-v4-pro", "deepseek-v4-pro"],
+    ]),
+    range: "all",
+  }).join("\n");
+  assert.match(chart, /Tokens per Day/);
+  assert.match(chart, /● Pro 1 .*● Fable 5 .*● deepseek-v4-pro/);
+  assert.match(chart, /In: 127\.4k · Out: 5\.1m · Cache: 800k/);
+  assert.match(chart, /All time · Last 7 days · Last 30 days/);
+  assert.match(chart, /[─│╭╮╰╯]/);
+  const dateAxis = chart.split("\n").find((line) => line.includes("Jul 26") && line.includes("Jul 27"));
+  assert.ok(dateAxis);
+  assert.equal(dateAxis.match(/Jul 26/g)?.length, 1);
+  assert.equal(dateAxis.match(/Jul 27/g)?.length, 1);
+  assert.ok(dateAxis.indexOf("Jul 26") > 10);
+  assert.ok(dateAxis.indexOf("Jul 27") < 78);
+  assert.ok(chart.split("\n").every((line) => line.length <= 88));
+  const dimChart = renderUsageStats({
+    width: 140,
+    height: 5,
+    theme: {
+      fg: (color, text) => color === "dim" ? `\x1b[2m${text}\x1b[22m` : text,
+      bold: (text) => text,
+    },
+    statistics: summarizeUsage(mergeUsageSamples(currentSamples, historicalSamples), "all", statsNow + 1),
+    labels: new Map([
+      ["acme/pro-1", "Pro 1"],
+      ["acme/other", "Fable 5"],
+      ["other-provider/deepseek-v4-pro", "deepseek-v4-pro"],
+    ]),
+    range: "all",
+  }).join("\n");
+  assert.match(dimChart, /Pro 1\x1b\[2m \(.*%\)\x1b\[22m/);
+  assert.match(dimChart, /\x1b\[2m  In: 127\.4k · Out: 5\.1m · Cache: 800k\x1b\[22m/);
 
   const indexModule = await import("./index.ts");
   const extension = indexModule.default;
@@ -222,13 +324,19 @@ try {
     modelRegistry: {
       getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "test-model-key", headers: {} }),
       getProviderAuth: async () => ({ auth: { apiKey: "test-model-key" }, env: {} }),
+      find: (provider, modelId) => modelId === "pro-1" ? {
+        provider,
+        id: modelId,
+        name: "Pro 1",
+      } : undefined,
+      getAll: () => [{ provider: "catalog", id: "other", name: "Fable 5" }],
       getProviderDisplayName: (provider) => ({
         "renamed-codex": "OpenAI Codex",
         "renamed-openrouter": "OpenRouter",
         "renamed-deepseek": "DeepSeek",
       })[provider] ?? provider,
     },
-    sessionManager: { getBranch: () => entries },
+    sessionManager: { getBranch: () => entries, getEntries: () => entries },
     getContextUsage: () => ({ tokens: 250, contextWindow: 1000, percent: 25 }),
     ui: {
       theme: {
@@ -262,7 +370,7 @@ try {
     const rendered = component.render(100).join("\n");
     assert.doesNotMatch(rendered, /pi-usage settings/);
     assert.match(rendered, /Refresh interval/);
-    assert.match(rendered, /General.*Site Types/);
+    assert.match(rendered, /General.*Site Types.*Stats/);
     assert.match(rendered, /Esc to close/);
     assert.doesNotMatch(rendered, /Esc to cancel|Changes save and apply immediately|pi-usage\.json|Edit complete JSON|Reset to defaults/);
     component.handleInput("\r");
@@ -271,9 +379,19 @@ try {
     const siteTypeRendered = component.render(100).join("\n");
     assert.match(siteTypeRendered, /\bacme\b/);
     component.handleInput("\r");
+    component.handleInput("\t");
+    const statsRendered = component.render(100).join("\n");
+    assert.match(statsRendered, /Tokens per Day/);
+    assert.match(statsRendered, /Loading usage history/);
+    assert.doesNotMatch(statsRendered, /● Pro 1|● Fable 5|In: 127\.4k/);
+    component.handleInput("\x1b[C");
+    const recentStatsRendered = component.render(100).join("\n");
+    assert.match(recentStatsRendered, /Last 7 days/);
+    assert.doesNotMatch(recentStatsRendered, /● Pro 1|● Fable 5/);
     component.handleInput("\x1b");
   });
   await commands.get("usage").handler("", ctx);
+  await new Promise((resolve) => setTimeout(resolve, 100));
   const savedConfig = JSON.parse(readFileSync(join(stateDir, "pi-usage.json"), "utf8"));
   assert.equal(savedConfig.refreshIntervalSeconds, 300);
   assert.deepEqual(savedConfig.providerModes["new-api"], ["acme"]);
@@ -285,8 +403,20 @@ try {
     level: "error",
   });
 
+  customInteractions.push((component) => {
+    const rendered = component.render(100).join("\n");
+    assert.match(rendered, /General.*Site Types.*Stats/);
+    assert.match(rendered, /Tokens per Day/);
+    assert.match(rendered, /● Pro 1 .*● Fable 5/);
+    assert.match(rendered, /In: 127\.4k · Out: 5\.1m · Cache: 800k/);
+    assert.doesNotMatch(rendered, /Loading usage history|Refresh interval|Usage profile:|pi-usage\.json/);
+    component.handleInput("\x1b");
+  });
   await commands.get("usage").handler("status", ctx);
-  assert.match(notifications.at(-1).message, /custom-session/);
+  assert.deepEqual(notifications.at(-1), {
+    message: "Usage: /usage [refresh|reload|status]",
+    level: "error",
+  });
 
   writeFileSync(join(stateDir, "pi-usage.json"), JSON.stringify({
     version: 1,

@@ -5,6 +5,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
+	matchesKey,
 	SettingsList,
 	truncateToWidth,
 	type SettingItem,
@@ -24,10 +25,22 @@ import {
 	type NormalizedMeter,
 	type ProfileMatch,
 } from "./core.ts";
+import {
+	extractUsageSamples,
+	loadHistoricalUsageSamples,
+	mergeUsageSamples,
+	renderUsageStats,
+	summarizeUsage,
+	USAGE_RANGES,
+	type UsageRange,
+	type UsageSample,
+	type UsageStatistics,
+} from "./stats.ts";
 
 const STATUS_KEY = "pi-usage";
 const DEFAULT_REFRESH_SECONDS = 60;
 const DEFAULT_BAR_WIDTH = 12;
+const STATS_HISTORY_CACHE_MS = 5 * 60_000;
 const CONFIG_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const CONFIG_PATH = process.env.PI_USAGE_CONFIG_PATH ?? join(CONFIG_DIR, "pi-usage.json");
 const CACHE_PATH = join(CONFIG_DIR, "pi-usage-cache.json");
@@ -428,8 +441,12 @@ async function providerAuth(registry: ModelRegistry, provider: string): Promise<
 	if (!resolved) throw new Error(`Credentials unavailable for provider ${provider}`);
 	return {
 		apiKey: resolved.auth.apiKey,
-		headers: { ...(resolved.auth.headers ?? {}) },
-		env: { ...(resolved.env ?? {}) },
+		headers: Object.fromEntries(Object.entries(resolved.auth.headers ?? {}).filter(
+			(entry): entry is [string, string] => typeof entry[1] === "string",
+		)),
+		env: Object.fromEntries(Object.entries(resolved.env ?? {}).filter(
+			(entry): entry is [string, string] => typeof entry[1] === "string",
+		)),
 	};
 }
 
@@ -798,7 +815,7 @@ function sessionMeters(profile: UsageProfile, model: Model<Api>, ctx: ExtensionC
 	if (profile.source.type !== "session") return [];
 	const meters: NormalizedMeter[] = [];
 	const context = ctx.getContextUsage();
-	if (profile.source.showContext !== false && context?.percent !== null) {
+	if (profile.source.showContext !== false && context && context.percent !== null) {
 		meters.push({
 			type: "quota",
 			label: "Context",
@@ -910,7 +927,6 @@ function formatResetRemaining(timestamp: number, now = Date.now()): string {
 
 export default function piUsage(pi: ExtensionAPI) {
 	let config = defaultConfig();
-	let configPath = CONFIG_PATH;
 	let configError: string | undefined;
 	let cache = loadCache();
 	let activeContext: ExtensionContext | undefined;
@@ -923,7 +939,23 @@ export default function piUsage(pi: ExtensionAPI) {
 	let refreshController: AbortController | undefined;
 	let refreshTimer: ReturnType<typeof setInterval> | undefined;
 	let countdownTimer: ReturnType<typeof setInterval> | undefined;
+	let historicalStatsCache: UsageSample[] | undefined;
+	let historicalStatsLoadedAt = 0;
+	let historicalStatsPromise: Promise<UsageSample[]> | undefined;
 	let generation = 0;
+
+	function loadHistoricalStats(): Promise<UsageSample[]> {
+		if (!historicalStatsPromise) {
+			historicalStatsPromise = loadHistoricalUsageSamples(join(CONFIG_DIR, "sessions")).then((samples) => {
+				historicalStatsCache = samples;
+				historicalStatsLoadedAt = Date.now();
+				return samples;
+			}).finally(() => {
+				historicalStatsPromise = undefined;
+			});
+		}
+		return historicalStatsPromise;
+	}
 
 	function clearDisplay(ctx: ExtensionContext): void {
 		// Clear the legacy footer status as well, so /reload cleanly migrates from
@@ -942,17 +974,18 @@ export default function piUsage(pi: ExtensionAPI) {
 			clearDisplay(ctx);
 			return;
 		}
+		const profile = activeProfile;
 		if (activeMeters.length === 0) {
-			setDisplay(ctx, refreshFailed ? ctx.ui.theme.fg("dim", `${activeProfile.label} unavailable`) : undefined);
+			setDisplay(ctx, refreshFailed ? ctx.ui.theme.fg("dim", `${profile.label} unavailable`) : undefined);
 			return;
 		}
 		// Subscription APIs often expose independent hourly/daily/weekly windows.
 		// Never silently hide those windows behind the metered-account display cap.
-		const displayedMeters = activeProfile.billing === "subscription"
+		const displayedMeters = profile.billing === "subscription"
 			? activeMeters
 			: activeMeters.slice(0, config.maxMeters);
 		const chunks = displayedMeters.map((meter) => {
-			const descriptor = windowDescriptor(meter, activeProfile.label);
+			const descriptor = windowDescriptor(meter, profile.label);
 			const label = descriptor ? ctx.ui.theme.fg("dim", `${descriptor} `) : "";
 			const resetAt = meter.type === "quota" ? resetTimestamp(meter) : undefined;
 			const reset = resetAt === undefined
@@ -978,14 +1011,13 @@ export default function piUsage(pi: ExtensionAPI) {
 		const age = refreshFailed && lastUpdatedAt !== undefined
 			? ctx.ui.theme.fg("dim", ` (${Math.max(1, Math.floor((Date.now() - lastUpdatedAt) / 60_000))}m ago)`)
 			: "";
-		const name = ctx.ui.theme.fg("dim", activeProfile.label);
+		const name = ctx.ui.theme.fg("dim", profile.label);
 		setDisplay(ctx, [name, ...chunks].join(ctx.ui.theme.fg("dim", " • ")) + age);
 	}
 
 	function loadConfiguration(ctx?: ExtensionContext): void {
 		const loaded = loadConfig();
 		config = loaded.config;
-		configPath = loaded.path;
 		configError = loaded.error;
 		if (configError && ctx?.hasUI) ctx.ui.notify(configError, "error");
 	}
@@ -1079,7 +1111,9 @@ export default function piUsage(pi: ExtensionAPI) {
 		}
 	}
 
-	async function showConfiguration(ctx: ExtensionContext): Promise<void> {
+	type ConfigurationPage = "general" | "siteTypes" | "stats";
+
+	async function showConfiguration(ctx: ExtensionContext, initialPage: ConfigurationPage = "general"): Promise<void> {
 		if (ctx.mode !== "tui") {
 			ctx.ui.notify("The pi-usage configuration interface requires TUI mode.", "error");
 			return;
@@ -1087,7 +1121,11 @@ export default function piUsage(pi: ExtensionAPI) {
 		let draft = parseConfig(JSON.parse(JSON.stringify(config)));
 		const provider = ctx.model?.provider;
 		const providerDisplayName = provider ? ctx.modelRegistry.getProviderDisplayName(provider) : undefined;
-		let activePage: "general" | "siteTypes" = "general";
+		let activePage: ConfigurationPage = initialPage;
+		let statsRange: UsageRange = "all";
+		const currentStatsSamples = extractUsageSamples(ctx.sessionManager.getEntries());
+		let statsSamples = mergeUsageSamples(currentStatsSamples, historicalStatsCache ?? []);
+		let statistics = summarizeUsage(statsSamples, statsRange);
 		const settingTheme = (theme: ExtensionContext["ui"]["theme"]): SettingsListTheme => ({
 			label: (text, selected) => selected ? theme.fg("accent", text) : text,
 			value: (text, selected) => selected ? theme.fg("accent", text) : theme.fg("muted", text),
@@ -1129,11 +1167,43 @@ export default function piUsage(pi: ExtensionAPI) {
 			values: ["automatic", "New API"],
 			description: "Configure which usage site framework this provider belongs to.",
 		}] : [];
-		const buildSettings = () => activePage === "general" ? buildGeneralSettings() : buildSiteTypeSettings();
+		const buildSettings = () => activePage === "siteTypes" ? buildSiteTypeSettings() : buildGeneralSettings();
+		const modelLabels = (usage: UsageStatistics): Map<string, string> => {
+			const registry = ctx.modelRegistry as ModelRegistry & {
+				find?: (provider: string, modelId: string) => Model<Api> | undefined;
+				getAll?: () => Model<Api>[];
+			};
+			const registeredModels = registry.getAll?.() ?? [];
+			const baseNames = usage.models.map((item) => {
+				const exactName = registry.find?.(item.provider, item.model)?.name;
+				if (exactName) return exactName;
+				const siblingNames = new Set(registeredModels
+					.filter((model) => model.id === item.model && !!model.name)
+					.map((model) => model.name));
+				return siblingNames.size === 1 ? [...siblingNames][0] : item.model;
+			});
+			const counts = new Map<string, number>();
+			for (const name of baseNames) counts.set(name, (counts.get(name) ?? 0) + 1);
+			return new Map(usage.models.map((item, index) => {
+				const name = baseNames[index];
+				const label = (counts.get(name) ?? 0) > 1
+					? `${name} (${ctx.modelRegistry.getProviderDisplayName(item.provider)})`
+					: name;
+				return [item.key, label];
+			}));
+		};
 
 		await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
 			let settingsList: SettingsList;
+			let historyLoading = false;
+			let historyLoaded = historicalStatsCache !== undefined;
+			let historyError: string | undefined;
+			let closed = false;
 
+			const close = () => {
+				closed = true;
+				done(undefined);
+			};
 			const applyDraft = (next: UsageConfig): boolean => {
 				const error = saveConfig(next);
 				if (error) {
@@ -1144,10 +1214,21 @@ export default function piUsage(pi: ExtensionAPI) {
 				start(ctx, true);
 				return true;
 			};
-			const activatePage = (page: "general" | "siteTypes") => {
-				activePage = page;
-				settingsList = createSettingsList();
-				tui.requestRender(true);
+			const loadStatsHistory = () => {
+				const cacheIsFresh = historyLoaded && Date.now() - historicalStatsLoadedAt < STATS_HISTORY_CACHE_MS;
+				if (historyLoading || cacheIsFresh) return;
+				historyLoading = true;
+				tui.requestRender();
+				void loadHistoricalStats().then((historical) => {
+					statsSamples = mergeUsageSamples(currentStatsSamples, historical);
+					statistics = summarizeUsage(statsSamples, statsRange);
+					historyLoaded = true;
+				}).catch((error) => {
+					historyError = error instanceof Error ? error.message : String(error);
+				}).finally(() => {
+					historyLoading = false;
+					if (!closed) tui.requestRender(true);
+				});
 			};
 			const createSettingsList = () => new SettingsList(
 				buildSettings(),
@@ -1167,29 +1248,66 @@ export default function piUsage(pi: ExtensionAPI) {
 					if (!applyDraft(parseConfig(next))) settingsList.updateValue(id, previousValue);
 					tui.requestRender();
 				},
-				() => done(undefined),
+				close,
 			);
+			const activatePage = (page: ConfigurationPage) => {
+				activePage = page;
+				if (page === "stats") loadStatsHistory();
+				else settingsList = createSettingsList();
+				tui.requestRender(true);
+			};
+			const selectRange = (direction: -1 | 1) => {
+				const index = USAGE_RANGES.indexOf(statsRange);
+				statsRange = USAGE_RANGES[(index + direction + USAGE_RANGES.length) % USAGE_RANGES.length];
+				statistics = summarizeUsage(statsSamples, statsRange);
+				tui.requestRender(true);
+			};
 
 			settingsList = createSettingsList();
+			if (activePage === "stats") loadStatsHistory();
 			return {
 				render: (width: number) => {
-					const settingsLines = settingsList.render(width).map((line) => line.replace("Esc to cancel", "Esc to close"));
-					const tabs = activePage === "general"
-						? `  ${theme.bold("General")}  ${theme.fg("dim", "/")}  ${theme.fg("dim", "Site Types")}`
-						: `  ${theme.fg("dim", "General")}  ${theme.fg("dim", "/")}  ${theme.bold("Site Types")}`;
+					const terminalRows = (tui as { terminal?: { rows?: number } }).terminal?.rows ?? 32;
+					const visibleStatistics = historyLoading && !historyLoaded
+						? summarizeUsage([], statsRange)
+						: statistics;
+					const body = activePage === "stats"
+						? renderUsageStats({
+							width,
+							height: Math.max(5, Math.min(9, terminalRows - 18)),
+							theme,
+							statistics: visibleStatistics,
+							labels: modelLabels(visibleStatistics),
+							range: statsRange,
+							loading: historyLoading,
+							error: historyError,
+							maxModels: width < 76 ? (terminalRows < 28 ? 2 : 3) : terminalRows < 26 ? 4 : 6,
+						})
+						: settingsList.render(width).map((line) => line.replace("Esc to cancel", "Esc to close"));
+					const tab = (page: ConfigurationPage, label: string) => activePage === page
+						? theme.bold(label)
+						: theme.fg("dim", label);
+					const tabs = `  ${tab("general", "General")}  ${theme.fg("dim", "/")}  ${tab("siteTypes", "Site Types")}  ${theme.fg("dim", "/")}  ${tab("stats", "Stats")}`;
 					return [
 						theme.fg("accent", "─".repeat(Math.max(0, width))),
 						tabs,
 						theme.fg("borderMuted", "─".repeat(Math.max(0, width))),
 						"",
-						...settingsLines,
+						...body,
 						theme.fg("accent", "─".repeat(Math.max(0, width))),
 					].map((line) => truncateToWidth(line, width, ""));
 				},
 				invalidate: () => settingsList.invalidate(),
 				handleInput: (data: string) => {
 					if (data === "\t") {
-						activatePage(activePage === "general" ? "siteTypes" : "general");
+						const pages: ConfigurationPage[] = ["general", "siteTypes", "stats"];
+						activatePage(pages[(pages.indexOf(activePage) + 1) % pages.length]);
+						return;
+					}
+					if (activePage === "stats") {
+						if (matchesKey(data, "escape")) close();
+						else if (matchesKey(data, "left")) selectRange(-1);
+						else if (matchesKey(data, "right")) selectRange(1);
 						return;
 					}
 					settingsList.handleInput?.(data);
@@ -1203,11 +1321,18 @@ export default function piUsage(pi: ExtensionAPI) {
 	pi.on("session_shutdown", () => stop());
 	pi.on("model_select", (_event, ctx) => start(ctx));
 	pi.on("message_end", (event, ctx) => {
-		if (event.message.role === "assistant" && activeProfile?.source.type === "session") void refresh();
+		if (event.message.role !== "assistant") return;
+		if (historicalStatsCache) {
+			historicalStatsCache = mergeUsageSamples(
+				historicalStatsCache,
+				extractUsageSamples([{ type: "message", message: event.message }]),
+			);
+		}
+		if (activeProfile?.source.type === "session") void refresh();
 	});
 
 	pi.registerCommand("usage", {
-		description: "Configure, refresh, reload, or inspect the adaptive usage display",
+		description: "Configure, view statistics, refresh, or reload the adaptive usage display",
 		getArgumentCompletions: (prefix) => {
 			const normalized = prefix.trim().toLowerCase();
 			const actions = ["refresh", "reload", "status"];
@@ -1233,9 +1358,7 @@ export default function piUsage(pi: ExtensionAPI) {
 				return;
 			}
 			if (action === "status") {
-				const model = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "none";
-				const error = lastError ? ` · error: ${lastError}` : "";
-				ctx.ui.notify(`Usage profile: ${activeProfile?.id ?? "none"} · model: ${model} · config: ${configPath}${error}`, lastError ? "warning" : "info");
+				await showConfiguration(ctx, "stats");
 				return;
 			}
 			const result = await refresh();
