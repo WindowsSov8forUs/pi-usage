@@ -1,6 +1,6 @@
 {
   "name": "pi-usage",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Show provider quota, balance, budget, and session usage in Pi.",
   "private": true,
   "type": "module",
