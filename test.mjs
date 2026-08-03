@@ -136,6 +136,22 @@ try {
         reset_at: (codexNow + 4 * 86_400_000) / 1_000,
       },
     },
+    rate_limits: [{
+      used_percent: 40,
+      limit_window_seconds: 604_800,
+      reset_at: (codexNow + 4 * 86_400_000) / 1_000,
+    }],
+    additional_rate_limits: [{
+      limit_name: "Codex Spark",
+      metered_feature: "codex_spark",
+      rate_limit: {
+        primary_window: {
+          used_percent: 5,
+          limit_window_seconds: 604_800,
+          reset_at: (codexNow + 2 * 86_400_000) / 1_000,
+        },
+      },
+    }],
     code_review_rate_limit: {
       primary_window: {
         used_percent: 10,
@@ -144,14 +160,18 @@ try {
       },
     },
   }, codexNow);
-  assert.equal(codexMeters.length, 3);
+  assert.equal(codexMeters.length, 4);
+  assert.equal(codexMeters.some((meter) => /^\d+$/.test(meter.label) || meter.label === "Additional"), false);
   const codexPrimary = codexMeters.find((meter) => meter.label === "Codex" && meter.windowMinutes === 300);
   const codexWeekly = codexMeters.find((meter) => meter.label === "Codex" && meter.windowMinutes === 10_080);
+  const codexSpark = codexMeters.find((meter) => meter.label === "Codex Spark" && meter.windowMinutes === 10_080);
   const codeReview = codexMeters.find((meter) => meter.label === "Code Review" && meter.windowMinutes === 43_200);
   assert.equal(codexPrimary?.remainingPercent, 80);
   assert.equal(codexPrimary?.resetAtMs, codexNow + 3_600_000);
   assert.equal(codexWeekly?.remainingPercent, 60);
   assert.equal(codexWeekly?.resetAtMs, codexNow + 4 * 86_400_000);
+  assert.equal(codexSpark?.remainingPercent, 95);
+  assert.equal(codexSpark?.resetAtMs, codexNow + 2 * 86_400_000);
   assert.equal(codeReview?.remainingPercent, 90);
   assert.equal(codeReview?.resetAtMs, codexNow + 14 * 86_400_000);
   const handlers = new Map();

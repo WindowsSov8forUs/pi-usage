@@ -325,7 +325,8 @@ function loadCache(): CacheFile {
 		for (const [key, value] of Object.entries(saved ?? {})) {
 			const item = record(value);
 			const updatedAt = finiteNumber(item?.updatedAt);
-			const meters = Array.isArray(item?.meters) ? item.meters.filter(isNormalizedMeter) : [];
+			const validMeters = Array.isArray(item?.meters) ? item.meters.filter(isNormalizedMeter) : [];
+			const meters = key.startsWith("codex:") ? dedupeCodexMeters(validMeters) : validMeters;
 			if (updatedAt !== undefined && meters.length > 0) entries[key] = { updatedAt, meters };
 		}
 		return { version: 1, entries };
@@ -677,11 +678,11 @@ function humanizeIdentifier(value: string): string {
 
 function codexWindowLabel(path: string[]): string {
 	const groupPath = /^(primary|secondary)(?:_window)?$/i.test(path.at(-1) ?? "") ? path.slice(0, -1) : path;
-	const group = [...groupPath].reverse().find((segment) => !/^rate_?limits?$/i.test(segment));
+	const group = [...groupPath].reverse().find((segment) => !/^\d+$/.test(segment) && !/^(?:additional_)?rate_?limits?$/i.test(segment));
 	return group ? humanizeIdentifier(group) || "Codex" : "Codex";
 }
 
-function codexWindowMeter(value: unknown, path: string[], now: number): NormalizedMeter | undefined {
+function codexWindowMeter(value: unknown, path: string[], now: number, inheritedLabel?: string): NormalizedMeter | undefined {
 	const item = record(value);
 	if (!item) return undefined;
 	const usedPercentPath = firstField(item, ["used_percent", "usedPercent"]);
@@ -705,7 +706,7 @@ function codexWindowMeter(value: unknown, path: string[], now: number): Normaliz
 	if (!hasQuota || !hasWindowMetadata || (!rateLimitPath && !conventionalWindow)) return undefined;
 	const meter = normalizeMeter(item, {
 		type: "quota",
-		label: codexWindowLabel(path),
+		label: inheritedLabel ?? codexWindowLabel(path),
 		usedPercentPath,
 		remainingPercentPath,
 		usedPath,
@@ -722,28 +723,47 @@ function codexWindowMeter(value: unknown, path: string[], now: number): Normaliz
 	return meter;
 }
 
+function codexMetadataLabel(item: Record<string, unknown> | undefined): string | undefined {
+	if (!item) return undefined;
+	for (const field of ["limit_name", "limitName", "metered_feature", "meteredFeature", "limit_id", "limitId"]) {
+		const value = item[field];
+		if (typeof value === "string" && value.trim()) return humanizeIdentifier(value);
+	}
+	return undefined;
+}
+
 /** Extract every quota window from current and legacy Codex usage payloads. */
 export function codexMetersFromPayload(payload: unknown, now = Date.now()): NormalizedMeter[] {
 	const meters: NormalizedMeter[] = [];
-	const visit = (value: unknown, path: string[], depth: number): void => {
+	const visit = (value: unknown, path: string[], depth: number, inheritedLabel?: string): void => {
 		if (depth > 8) return;
-		const meter = codexWindowMeter(value, path, now);
+		const item = record(value);
+		const label = codexMetadataLabel(item) ?? inheritedLabel;
+		const meter = codexWindowMeter(value, path, now, label);
 		if (meter) {
 			meters.push(meter);
 			return;
 		}
 		if (Array.isArray(value)) {
-			for (const [index, child] of value.entries()) visit(child, [...path, String(index)], depth + 1);
+			for (const [index, child] of value.entries()) visit(child, [...path, String(index)], depth + 1, inheritedLabel);
 			return;
 		}
-		const item = record(value);
 		if (!item) return;
-		for (const [key, child] of Object.entries(item)) visit(child, [...path, key], depth + 1);
+		for (const [key, child] of Object.entries(item)) visit(child, [...path, key], depth + 1, label);
 	};
 	visit(payload, [], 0);
 
+	return dedupeCodexMeters(meters).sort((left, right) => {
+		const labelOrder = left.label.localeCompare(right.label);
+		if (labelOrder !== 0) return labelOrder;
+		return (left.windowMinutes ?? Number.POSITIVE_INFINITY) - (right.windowMinutes ?? Number.POSITIVE_INFINITY);
+	});
+}
+
+function dedupeCodexMeters(meters: NormalizedMeter[]): NormalizedMeter[] {
 	const unique = new Map<string, NormalizedMeter>();
-	for (const meter of meters) {
+	for (const original of meters) {
+		const meter = /^\d+$/.test(original.label.trim()) ? { ...original, label: "Codex" } : original;
 		const key = [
 			meter.label,
 			meter.windowLabel ?? "",
@@ -755,11 +775,7 @@ export function codexMetersFromPayload(payload: unknown, now = Date.now()): Norm
 		].join("|");
 		if (!unique.has(key)) unique.set(key, meter);
 	}
-	return [...unique.values()].sort((left, right) => {
-		const labelOrder = left.label.localeCompare(right.label);
-		if (labelOrder !== 0) return labelOrder;
-		return (left.windowMinutes ?? Number.POSITIVE_INFINITY) - (right.windowMinutes ?? Number.POSITIVE_INFINITY);
-	});
+	return [...unique.values()];
 }
 
 function hasModelPricing(model: Model<Api>): boolean {
