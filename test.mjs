@@ -413,9 +413,30 @@ try {
   assert.match(newApiDisplay, /^acme • ─+ ¥75$/);
 
   writeFileSync(join(stateDir, "pi-usage.json"), JSON.stringify({ version: 1 }), "utf8");
-  model.provider = "renamed-openrouter";
-  model.baseUrl = "https://openrouter.ai/api/v1";
+  model.provider = "renamed-codex";
+  model.api = "openai-codex-responses";
+  model.baseUrl = "https://chatgpt.example/backend-api";
   let officialRequest;
+  globalThis.fetch = async (url) => {
+    officialRequest = String(url);
+    return new Response(JSON.stringify({
+      rate_limit: {
+        primary_window: {
+          used_percent: 25,
+          limit_window_seconds: 18_000,
+          reset_after_seconds: 3_600,
+        },
+      },
+    }), { status: 200 });
+  };
+  await commands.get("usage").handler("reload", ctx);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(officialRequest, "https://chatgpt.example/backend-api/wham/usage");
+  assert.match(widgets.get("pi-usage")?.lines.join("\n"), /^Codex • 5h ─+ 75%/);
+
+  model.provider = "renamed-openrouter";
+  model.api = "openai-completions";
+  model.baseUrl = "https://openrouter.ai/api/v1";
   globalThis.fetch = async (url) => {
     officialRequest = String(url);
     return new Response(JSON.stringify({ data: { limit_remaining: 80, usage: 20, limit: 100 } }), { status: 200 });

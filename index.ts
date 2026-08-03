@@ -31,7 +31,6 @@ const DEFAULT_BAR_WIDTH = 12;
 const CONFIG_DIR = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const CONFIG_PATH = process.env.PI_USAGE_CONFIG_PATH ?? join(CONFIG_DIR, "pi-usage.json");
 const CACHE_PATH = join(CONFIG_DIR, "pi-usage-cache.json");
-const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_AUTH_CLAIM = "https://api.openai.com/auth";
 
 type BillingType = "subscription" | "metered";
@@ -127,7 +126,7 @@ const BUILT_IN_PROFILES: UsageProfile[] = [
 		id: "codex",
 		label: "Codex",
 		priority: 300,
-		match: { providers: ["openai-codex"] },
+		match: { apis: ["openai-codex-responses"] },
 		billing: "subscription",
 		source: { type: "codex" },
 	},
@@ -140,7 +139,7 @@ const BUILT_IN_PROFILES: UsageProfile[] = [
 		source: {
 			type: "http-json",
 			request: {
-				url: "https://openrouter.ai/api/v1/key",
+				url: "${baseUrl}/key",
 				auth: { type: "model" },
 			},
 			meters: [{
@@ -161,7 +160,7 @@ const BUILT_IN_PROFILES: UsageProfile[] = [
 		source: {
 			type: "http-json",
 			request: {
-				url: "https://api.deepseek.com/user/balance",
+				url: "${baseUrlWithoutV1}/user/balance",
 				auth: { type: "model" },
 			},
 			meters: [{
@@ -430,6 +429,7 @@ function templateString(value: string, model: Model<Api>, env: Record<string, st
 		if (key === "model") return model.id;
 		if (key === "api") return model.api;
 		if (key === "baseUrl") return model.baseUrl.replace(/\/$/, "");
+		if (key === "baseUrlWithoutV1") return model.baseUrl.replace(/\/v1\/?$/i, "").replace(/\/$/, "");
 		if (key.startsWith("env:")) return env[key.slice(4)] ?? process.env[key.slice(4)] ?? "";
 		return "";
 	});
@@ -650,7 +650,8 @@ async function fetchCodexMeters(
 	headers.set("OAI-Language", "en");
 	headers.set("originator", "pi");
 	const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(20_000)]);
-	const response = await fetch(CODEX_USAGE_URL, { method: "GET", headers, signal: requestSignal });
+	const usageUrl = `${model.baseUrl.replace(/\/v1\/?$/i, "").replace(/\/$/, "")}/wham/usage`;
+	const response = await fetch(usageUrl, { method: "GET", headers, signal: requestSignal });
 	const text = await response.text();
 	if (!response.ok) throw responseError("Codex usage request failed", response, text);
 	let payload: unknown;
