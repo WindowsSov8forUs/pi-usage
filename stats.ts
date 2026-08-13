@@ -6,6 +6,8 @@ import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 export const USAGE_RANGES = ["all", "7d", "30d"] as const;
 export type UsageRange = typeof USAGE_RANGES[number];
+export const USAGE_METRICS = ["tokens", "cost"] as const;
+export type UsageMetric = typeof USAGE_METRICS[number];
 
 export type UsageSample = {
 	timestamp: number;
@@ -16,6 +18,7 @@ export type UsageSample = {
 	cacheRead: number;
 	cacheWrite: number;
 	tokens: number;
+	cost: number;
 };
 
 export type ModelUsageSummary = {
@@ -26,13 +29,17 @@ export type ModelUsageSummary = {
 	output: number;
 	cache: number;
 	tokens: number;
-	daily: Map<string, number>;
+	cost: number;
+	dailyTokens: Map<string, number>;
+	dailyCost: Map<string, number>;
 };
 
 export type UsageStatistics = {
 	dateKeys: string[];
 	models: ModelUsageSummary[];
 	totalTokens: number;
+	totalCost: number;
+	zeroCostModels: number;
 };
 
 export type StatsTheme = {
@@ -49,6 +56,7 @@ type StatsRenderOptions = {
 	statistics: UsageStatistics;
 	labels: Map<string, string>;
 	range: UsageRange;
+	metric: UsageMetric;
 	loading?: boolean;
 	error?: string;
 	maxModels?: number;
@@ -88,7 +96,8 @@ function sampleFromEntry(value: unknown): UsageSample | undefined {
 	const cacheWrite = nonnegativeNumber(usage.cacheWrite);
 	const reportedTotal = nonnegativeNumber(usage.totalTokens);
 	const tokens = input + output > 0 ? input + output : reportedTotal;
-	if (tokens <= 0 && cacheRead + cacheWrite <= 0) return undefined;
+	const cost = nonnegativeNumber(record(usage.cost)?.total);
+	if (tokens <= 0 && cacheRead + cacheWrite <= 0 && cost <= 0) return undefined;
 	return {
 		timestamp,
 		provider: message.provider,
@@ -98,6 +107,7 @@ function sampleFromEntry(value: unknown): UsageSample | undefined {
 		cacheRead,
 		cacheWrite,
 		tokens,
+		cost,
 	};
 }
 
@@ -118,6 +128,7 @@ function sampleFingerprint(sample: UsageSample): string {
 		sample.cacheRead,
 		sample.cacheWrite,
 		sample.tokens,
+		sample.cost,
 	].join("|");
 }
 
@@ -216,7 +227,9 @@ export function summarizeUsage(samples: UsageSample[], range: UsageRange, now = 
 				output: 0,
 				cache: 0,
 				tokens: 0,
-				daily: new Map(),
+				cost: 0,
+				dailyTokens: new Map(),
+				dailyCost: new Map(),
 			};
 			models.set(key, summary);
 		}
@@ -224,15 +237,28 @@ export function summarizeUsage(samples: UsageSample[], range: UsageRange, now = 
 		summary.output += sample.output;
 		summary.cache += sample.cacheRead + sample.cacheWrite;
 		summary.tokens += sample.tokens;
+		summary.cost += sample.cost;
 		const day = dateKey(startOfLocalDay(sample.timestamp));
-		summary.daily.set(day, (summary.daily.get(day) ?? 0) + sample.tokens);
+		summary.dailyTokens.set(day, (summary.dailyTokens.get(day) ?? 0) + sample.tokens);
+		summary.dailyCost.set(day, (summary.dailyCost.get(day) ?? 0) + sample.cost);
 	}
 	const sorted = [...models.values()].sort((left, right) => right.tokens - left.tokens || left.key.localeCompare(right.key));
 	return {
 		dateKeys,
 		models: sorted,
 		totalTokens: sorted.reduce((total, model) => total + model.tokens, 0),
+		totalCost: sorted.reduce((total, model) => total + model.cost, 0),
+		zeroCostModels: sorted.filter((model) => model.cost <= 0).length,
 	};
+}
+
+export function modelsForMetric(statistics: UsageStatistics, metric: UsageMetric): ModelUsageSummary[] {
+	return statistics.models
+		.filter((model) => metric === "tokens" ? model.tokens > 0 : model.cost > 0)
+		.sort((left, right) => {
+			const difference = metric === "tokens" ? right.tokens - left.tokens : right.cost - left.cost;
+			return difference || left.key.localeCompare(right.key);
+		});
 }
 
 export function formatCompactNumber(value: number): string {
@@ -245,13 +271,25 @@ export function formatCompactNumber(value: number): string {
 	return Math.round(value).toLocaleString("en-US");
 }
 
-function formatAxisNumber(value: number): string {
+export function formatUsd(value: number): string {
+	if (value >= 1_000) return `$${formatCompactNumber(value)}`;
+	return `$${value.toFixed(4).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "")}`;
+}
+
+function formatUsdAxis(value: number): string {
+	if (value >= 1_000) return `$${formatCompactNumber(value)}`;
+	const precision = value >= 100 ? 0 : value >= 10 ? 1 : value >= 1 ? 2 : 4;
+	return `$${value.toFixed(precision).replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "")}`;
+}
+
+function formatAxisNumber(value: number, metric: UsageMetric): string {
+	if (metric === "cost") return formatUsdAxis(value);
 	return formatCompactNumber(value).replace(/m$/, "M").replace(/b$/, "B");
 }
 
 function niceMaximum(value: number): number {
 	if (value <= 0) return 1;
-	const step = 10 ** Math.max(0, Math.floor(Math.log10(value)) - 1);
+	const step = 10 ** (Math.floor(Math.log10(value)) - 1);
 	return Math.ceil(value / step) * step;
 }
 
@@ -305,28 +343,40 @@ function connectPath(grid: number[][], x1: number, y1: number, x2: number, y2: n
 	}
 }
 
-function valuesForColumns(model: DisplayModel, dateKeys: string[], width: number): number[] {
+function dailyValues(model: DisplayModel, metric: UsageMetric): Map<string, number> {
+	return metric === "tokens" ? model.dailyTokens : model.dailyCost;
+}
+
+function valuesForColumns(model: DisplayModel, dateKeys: string[], width: number, metric: UsageMetric): number[] {
 	if (dateKeys.length === 0) return Array(width).fill(0);
+	const daily = dailyValues(model, metric);
 	return Array.from({ length: width }, (_, column) => {
 		const startIndex = Math.min(dateKeys.length - 1, Math.floor(column * dateKeys.length / width));
 		const endIndex = Math.max(startIndex, Math.floor((column + 1) * dateKeys.length / width) - 1);
 		let total = 0;
-		for (let index = startIndex; index <= endIndex; index++) total += model.daily.get(dateKeys[index]) ?? 0;
+		for (let index = startIndex; index <= endIndex; index++) total += daily.get(dateKeys[index]) ?? 0;
 		return total / (endIndex - startIndex + 1);
 	});
 }
 
 const SERIES_COLORS = ["accent", "success", "warning", "error", "syntaxFunction", "syntaxString"] as const;
 
-function renderChart(models: DisplayModel[], dateKeys: string[], width: number, height: number, theme: StatsTheme): string[] {
-	const rawMaximum = Math.max(0, ...models.flatMap((model) => [...model.daily.values()]));
+function renderChart(
+	models: DisplayModel[],
+	dateKeys: string[],
+	width: number,
+	height: number,
+	theme: StatsTheme,
+	metric: UsageMetric,
+): string[] {
+	const rawMaximum = Math.max(0, ...models.flatMap((model) => [...dailyValues(model, metric).values()]));
 	const maximum = niceMaximum(rawMaximum);
-	const yLabels = Array.from({ length: height }, (_, row) => formatAxisNumber(maximum * (height - 1 - row) / (height - 1)));
+	const yLabels = Array.from({ length: height }, (_, row) => formatAxisNumber(maximum * (height - 1 - row) / (height - 1), metric));
 	const labelWidth = Math.max(1, ...yLabels.map((label) => visibleWidth(label)));
 	const plotWidth = Math.max(8, width - labelWidth - 2);
 	const paths = models.map((model) => {
 		const grid = Array.from({ length: height }, () => Array(plotWidth).fill(0) as number[]);
-		const values = valuesForColumns(model, dateKeys, plotWidth);
+		const values = valuesForColumns(model, dateKeys, plotWidth, metric);
 		const points = values.map((value, x) => ({
 			x,
 			y: Math.max(0, Math.min(height - 1, Math.round((height - 1) * (1 - value / maximum)))),
@@ -350,7 +400,14 @@ function renderChart(models: DisplayModel[], dateKeys: string[], width: number, 
 					break;
 				}
 			}
-			plot += series < 0 ? " " : theme.fg(SERIES_COLORS[series % SERIES_COLORS.length], pathCharacter(paths[series][row][column]));
+			if (series < 0) {
+				plot += row === height - 1 ? theme.fg("dim", "─") : " ";
+			} else {
+				const bits = row === height - 1
+					? paths[series][row][column] | LEFT | RIGHT
+					: paths[series][row][column];
+				plot += theme.fg(SERIES_COLORS[series % SERIES_COLORS.length], pathCharacter(bits));
+			}
 		}
 		const crossesAxis = paths.some((path) => (path[row][0] & RIGHT) !== 0);
 		const axis = row === height - 1 || crossesAxis ? "┼" : "┤";
@@ -404,13 +461,22 @@ function padVisible(text: string, width: number): string {
 	return truncateToWidth(text, width, "") + " ".repeat(Math.max(0, width - visibleWidth(truncateToWidth(text, width, ""))));
 }
 
-function summaryLines(models: DisplayModel[], total: number, width: number, theme: StatsTheme): string[] {
+function summaryLines(
+	models: DisplayModel[],
+	total: number,
+	width: number,
+	theme: StatsTheme,
+	metric: UsageMetric,
+): string[] {
 	const block = (model: DisplayModel, index: number): [string, string] => {
-		const share = total > 0 ? 100 * model.tokens / total : 0;
+		const value = metric === "tokens" ? model.tokens : model.cost;
+		const share = total > 0 ? 100 * value / total : 0;
 		const bullet = theme.fg(SERIES_COLORS[index % SERIES_COLORS.length], "●");
 		const heading = `${bullet} ${model.label}${theme.fg("dim", ` (${share.toFixed(1)}%)`)}`;
 		const cache = model.cache > 0 ? ` · Cache: ${formatCompactNumber(model.cache)}` : "";
-		const details = `  In: ${formatCompactNumber(model.input)} · Out: ${formatCompactNumber(model.output)}${cache}`;
+		const details = metric === "tokens"
+			? `  In: ${formatCompactNumber(model.input)} · Out: ${formatCompactNumber(model.output)}${cache}`
+			: `  Cost: ${formatUsd(model.cost)}`;
 		return [heading, theme.fg("dim", details)];
 	};
 	if (width < 76 || models.length < 2) return models.flatMap((model, index) => block(model, index));
@@ -427,52 +493,80 @@ function summaryLines(models: DisplayModel[], total: number, width: number, them
 	return lines;
 }
 
-function rangeSelector(range: UsageRange, theme: StatsTheme): string {
-	const labels: Array<[UsageRange, string]> = [["all", "All time"], ["7d", "Last 7 days"], ["30d", "Last 30 days"]];
-	return labels.map(([value, label]) => value === range
+function optionSelector<T extends string>(
+	options: ReadonlyArray<readonly [T, string]>,
+	selected: T,
+	theme: StatsTheme,
+): string {
+	return options.map(([value, label]) => value === selected
 		? theme.fg("accent", theme.bold(label))
 		: theme.fg("dim", label)).join(theme.fg("dim", " · "));
 }
 
+function metricSelector(metric: UsageMetric, theme: StatsTheme): string {
+	return optionSelector<UsageMetric>([["tokens", "Tokens"], ["cost", "Cost"]], metric, theme);
+}
+
+function rangeSelector(range: UsageRange, theme: StatsTheme): string {
+	return optionSelector<UsageRange>([["all", "All time"], ["7d", "Last 7 days"], ["30d", "Last 30 days"]], range, theme);
+}
+
+function controls(theme: StatsTheme): string {
+	return theme.fg("dim", "↑/↓ metric · ←/→ range · Tab pages · Esc to close");
+}
+
 export function renderUsageStats(options: StatsRenderOptions): string[] {
 	const width = Math.max(20, Math.min(88, options.width));
-	const displayModels = options.statistics.models.slice(0, options.maxModels ?? 6).map((model) => ({
+	const metricModels = modelsForMetric(options.statistics, options.metric);
+	const displayModels = metricModels.slice(0, options.maxModels ?? 6).map((model) => ({
 		...model,
 		label: options.labels.get(model.key) ?? model.model,
 	}));
+	const title = options.metric === "tokens" ? "Tokens per Day" : "Cost per Day";
+	const hiddenCostMessage = options.metric === "cost" && options.statistics.zeroCostModels > 0
+		? `${options.statistics.zeroCostModels} ${options.statistics.zeroCostModels === 1 ? "model" : "models"} with $0 recorded cost hidden`
+		: undefined;
 	if (displayModels.length === 0) {
-		return [
-			options.theme.bold("Tokens per Day"),
+		const lines = [
+			options.theme.bold(title),
 			"",
 			options.loading
 				? options.theme.fg("dim", "Loading usage history…")
-				: options.theme.fg("dim", "No model usage was found in Pi sessions."),
+				: options.theme.fg("dim", options.metric === "tokens"
+					? "No model usage was found in Pi sessions."
+					: "No recorded model cost was found in Pi sessions."),
 			"",
+			metricSelector(options.metric, options.theme),
 			rangeSelector(options.range, options.theme),
-			"",
-			options.theme.fg("dim", "←/→ range · Tab pages · Esc to close"),
 		];
+		if (hiddenCostMessage) lines.push("", options.theme.fg("dim", hiddenCostMessage));
+		if (options.error) lines.push(options.theme.fg("warning", `History unavailable: ${options.error}`));
+		lines.push("", controls(options.theme));
+		return lines.map((line) => truncateToWidth(line, width, ""));
 	}
 	const requestedHeight = options.height ?? 9;
 	const chartHeight = Math.max(5, Math.min(9, requestedHeight));
-	const maximum = niceMaximum(Math.max(0, ...displayModels.flatMap((model) => [...model.daily.values()])));
+	const maximum = niceMaximum(Math.max(0, ...displayModels.flatMap((model) => [...dailyValues(model, options.metric).values()])));
 	const labelWidth = Math.max(...Array.from({ length: chartHeight }, (_, row) =>
-		visibleWidth(formatAxisNumber(maximum * (chartHeight - 1 - row) / (chartHeight - 1)))));
+		visibleWidth(formatAxisNumber(maximum * (chartHeight - 1 - row) / (chartHeight - 1), options.metric))));
+	const total = options.metric === "tokens" ? options.statistics.totalTokens : options.statistics.totalCost;
 	const lines = [
-		options.theme.bold("Tokens per Day"),
-		...renderChart(displayModels, options.statistics.dateKeys, width, chartHeight, options.theme),
+		options.theme.bold(title),
+		...renderChart(displayModels, options.statistics.dateKeys, width, chartHeight, options.theme, options.metric),
 		options.theme.fg("dim", renderDateAxis(options.statistics.dateKeys, width, labelWidth)),
 		...wrapLegend(displayModels, width, options.theme),
 		"",
+		metricSelector(options.metric, options.theme),
 		rangeSelector(options.range, options.theme),
 		"",
-		...summaryLines(displayModels, options.statistics.totalTokens, width, options.theme),
+		...summaryLines(displayModels, total, width, options.theme, options.metric),
 	];
-	if (options.statistics.models.length > displayModels.length) {
-		lines.push(options.theme.fg("dim", `+ ${options.statistics.models.length - displayModels.length} more models outside the chart`));
+	if (metricModels.length > displayModels.length) {
+		lines.push(options.theme.fg("dim", `+ ${metricModels.length - displayModels.length} more models outside the chart`));
 	}
+	if (hiddenCostMessage) lines.push(options.theme.fg("dim", hiddenCostMessage));
 	if (options.loading) lines.push(options.theme.fg("dim", "Loading usage history…"));
 	if (options.error) lines.push(options.theme.fg("warning", `History unavailable: ${options.error}`));
-	lines.push("", options.theme.fg("dim", "←/→ range · Tab pages · Esc to close"));
+	lines.push("", controls(options.theme));
 	return lines.map((line) => truncateToWidth(line, width, ""));
 }

@@ -31,7 +31,9 @@ import {
 	mergeUsageSamples,
 	renderUsageStats,
 	summarizeUsage,
+	USAGE_METRICS,
 	USAGE_RANGES,
+	type UsageMetric,
 	type UsageRange,
 	type UsageSample,
 	type UsageStatistics,
@@ -418,9 +420,15 @@ function responseError(prefix: string, response: Response, text: string): Error 
 	return new Error(`${prefix}: HTTP ${response.status} ${response.statusText}${detail ? ` — ${detail}` : ""}`);
 }
 
+function definedStringRecord(value: Record<string, string | null | undefined> | undefined): Record<string, string> {
+	return Object.fromEntries(Object.entries(value ?? {}).filter(
+		(entry): entry is [string, string] => typeof entry[1] === "string",
+	));
+}
+
 async function optionalProviderEnv(registry: ModelRegistry, provider: string): Promise<Record<string, string>> {
 	try {
-		return { ...((await registry.getProviderAuth(provider))?.env ?? {}) };
+		return definedStringRecord((await registry.getProviderAuth(provider))?.env);
 	} catch {
 		return {};
 	}
@@ -431,7 +439,7 @@ async function modelAuth(registry: ModelRegistry, model: Model<Api>): Promise<Re
 	if (!resolved.ok) throw new Error(resolved.error);
 	return {
 		apiKey: resolved.apiKey,
-		headers: { ...(resolved.headers ?? {}) },
+		headers: definedStringRecord(resolved.headers),
 		env: await optionalProviderEnv(registry, model.provider),
 	};
 }
@@ -441,12 +449,8 @@ async function providerAuth(registry: ModelRegistry, provider: string): Promise<
 	if (!resolved) throw new Error(`Credentials unavailable for provider ${provider}`);
 	return {
 		apiKey: resolved.auth.apiKey,
-		headers: Object.fromEntries(Object.entries(resolved.auth.headers ?? {}).filter(
-			(entry): entry is [string, string] => typeof entry[1] === "string",
-		)),
-		env: Object.fromEntries(Object.entries(resolved.env ?? {}).filter(
-			(entry): entry is [string, string] => typeof entry[1] === "string",
-		)),
+		headers: definedStringRecord(resolved.auth.headers),
+		env: definedStringRecord(resolved.env),
 	};
 }
 
@@ -1122,6 +1126,7 @@ export default function piUsage(pi: ExtensionAPI) {
 		const provider = ctx.model?.provider;
 		const providerDisplayName = provider ? ctx.modelRegistry.getProviderDisplayName(provider) : undefined;
 		let activePage: ConfigurationPage = initialPage;
+		let statsMetric: UsageMetric = "tokens";
 		let statsRange: UsageRange = "all";
 		const currentStatsSamples = extractUsageSamples(ctx.sessionManager.getEntries());
 		let statsSamples = mergeUsageSamples(currentStatsSamples, historicalStatsCache ?? []);
@@ -1256,6 +1261,11 @@ export default function piUsage(pi: ExtensionAPI) {
 				else settingsList = createSettingsList();
 				tui.requestRender(true);
 			};
+			const selectMetric = (direction: -1 | 1) => {
+				const index = USAGE_METRICS.indexOf(statsMetric);
+				statsMetric = USAGE_METRICS[(index + direction + USAGE_METRICS.length) % USAGE_METRICS.length];
+				tui.requestRender(true);
+			};
 			const selectRange = (direction: -1 | 1) => {
 				const index = USAGE_RANGES.indexOf(statsRange);
 				statsRange = USAGE_RANGES[(index + direction + USAGE_RANGES.length) % USAGE_RANGES.length];
@@ -1278,6 +1288,7 @@ export default function piUsage(pi: ExtensionAPI) {
 							theme,
 							statistics: visibleStatistics,
 							labels: modelLabels(visibleStatistics),
+							metric: statsMetric,
 							range: statsRange,
 							loading: historyLoading,
 							error: historyError,
@@ -1306,6 +1317,8 @@ export default function piUsage(pi: ExtensionAPI) {
 					}
 					if (activePage === "stats") {
 						if (matchesKey(data, "escape")) close();
+						else if (matchesKey(data, "up")) selectMetric(-1);
+						else if (matchesKey(data, "down")) selectMetric(1);
 						else if (matchesKey(data, "left")) selectRange(-1);
 						else if (matchesKey(data, "right")) selectRange(1);
 						return;

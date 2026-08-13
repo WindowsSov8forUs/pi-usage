@@ -71,9 +71,11 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
 
 `Stats` 从 `~/.pi/agent/sessions` 下的 Pi session JSONL 中读取 assistant message 已记录的 `provider`、`model`、时间及 usage，在本地按自然日聚合，不会请求供应商账户接口，也不会保存另一份聊天内容或统计历史。当前尚未落盘的 session 会直接从 Pi 的 session manager 合并进去；fork/clone 中复制的相同记录会去重。首次扫描完成前只显示加载状态，避免先渲染当前 session 的局部趋势再跳到全量数据；结果会在内存中缓存五分钟，新完成的 assistant message 会立即合并。
 
-图表使用彩色终端箱线字符绘制 `Tokens per Day` 阶梯线，并显示模型在所选时间范围内的占比、Input、Output 和非零 Cache token。最多绘制用量最高的六个模型，避免图表与详情超出普通终端高度。使用 `←/→` 在 `All time`、`Last 7 days` 和 `Last 30 days` 之间切换，Tab 切换页面，Escape 关闭。
+图表使用彩色终端箱线字符绘制按日阶梯线，并提供 `Tokens` 与 `Cost` 两种指标。Token 视图显示模型在所选时间范围内的 token 占比、Input、Output 和非零 Cache token；Cost 视图显示费用占比和累计费用。费用直接来自 Pi assistant message 中已经计算并持久化的 `usage.cost.total`，不是供应商账单。记录费用为 `$0` 的模型会从 Cost 视图隐藏，这通常表示对应模型或历史记录没有可用价格。
 
-这里的模型 token 趋势与底部 provider 额度含义不同：趋势来自实际 Pi 对话消息；Codex quota、OpenRouter Key 余额、DeepSeek 余额和 New API 账户余额仍是 provider/账户级指标，不会错误归因到刷新时选中的模型。
+最多绘制当前指标最高的六个模型，避免图表与详情超出普通终端高度。使用 `↑/↓` 切换 `Tokens / Cost`，使用 `←/→` 在 `All time`、`Last 7 days` 和 `Last 30 days` 之间切换，Tab 切换页面，Escape 关闭。
+
+这里的模型 token／费用趋势与底部 provider 额度含义不同：趋势来自实际 Pi 对话消息；Codex quota、OpenRouter Key 余额、DeepSeek 余额和 New API 账户余额仍是 provider/账户级指标，不会错误归因到刷新时选中的模型。
 
 ## 顶层配置
 

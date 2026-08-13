@@ -6,6 +6,14 @@ import { join } from "node:path";
 const stateDir = mkdtempSync(join(tmpdir(), "pi-usage-test-"));
 process.env.PI_CODING_AGENT_DIR = stateDir;
 process.env.PI_USAGE_CONFIG_PATH = join(stateDir, "pi-usage.json");
+const waitUntil = async (predicate, timeoutMs = 2_000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("Timed out waiting for asynchronous UI update");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+};
+
 writeFileSync(join(stateDir, "pi-usage.json"), JSON.stringify({
   version: 1,
   profiles: [{
@@ -138,19 +146,74 @@ try {
 
   const {
     extractUsageSamples,
+    formatUsd,
     loadHistoricalUsageSamples,
     mergeUsageSamples,
+    modelsForMetric,
     renderUsageStats,
     summarizeUsage,
   } = await import("./stats.ts");
   const currentSamples = extractUsageSamples(entries);
   assert.equal(currentSamples.length, 2);
+  assert.equal(currentSamples[0].cost, 0.125);
+  assert.equal(currentSamples[1].cost, 9);
+  const edgeSamples = extractUsageSamples([
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        provider: "priced-only",
+        model: "legacy-cost",
+        timestamp: statsNow - 1_000,
+        usage: { input: 0, output: 0, totalTokens: 0, cost: { total: 0.005 } },
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        provider: "unpriced",
+        model: "zero-cost",
+        timestamp: statsNow - 2_000,
+        usage: { input: 100, output: 0, totalTokens: 100 },
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        provider: "invalid-cost",
+        model: "negative-cost",
+        timestamp: statsNow - 3_000,
+        usage: { input: 100, output: 0, totalTokens: 100, cost: { total: -1 } },
+      },
+    },
+    {
+      type: "message",
+      message: {
+        role: "assistant",
+        provider: "invalid-cost",
+        model: "infinite-cost",
+        timestamp: statsNow - 4_000,
+        usage: { input: 100, output: 0, totalTokens: 100, cost: { total: Infinity } },
+      },
+    },
+  ]);
+  assert.equal(edgeSamples.length, 4);
+  assert.equal(edgeSamples[0].tokens, 0);
+  assert.equal(edgeSamples[0].cost, 0.005);
+  assert.deepEqual(edgeSamples.slice(1).map((sample) => sample.cost), [0, 0, 0]);
+  assert.equal(mergeUsageSamples([edgeSamples[0]], [{ ...edgeSamples[0], cost: 0.006 }]).length, 2);
   const allStatistics = summarizeUsage(currentSamples, "all", statsNow + 1);
   assert.equal(allStatistics.models.length, 2);
   assert.equal(allStatistics.models[0].key, "acme/pro-1");
   assert.equal(allStatistics.models[0].tokens, 5_227_400);
   assert.equal(allStatistics.models[0].cache, 800_000);
+  assert.equal(allStatistics.models[0].cost, 0.125);
+  assert.equal(allStatistics.models[0].dailyCost.get("2025-07-26"), 0.125);
   assert.equal(allStatistics.totalTokens, 7_121_500);
+  assert.equal(allStatistics.totalCost, 9.125);
+  assert.equal(allStatistics.zeroCostModels, 0);
   assert.equal(summarizeUsage(currentSamples, "7d", statsNow + 1).dateKeys.length, 7);
 
   const historyDir = join(stateDir, "sessions", "--test--");
@@ -174,6 +237,20 @@ try {
   const historicalSamples = await loadHistoricalUsageSamples(join(stateDir, "sessions"));
   assert.equal(historicalSamples.length, 2);
   assert.equal(mergeUsageSamples(currentSamples, historicalSamples).length, 3);
+  const combinedSamples = mergeUsageSamples(currentSamples, historicalSamples, edgeSamples);
+  const combinedStatistics = summarizeUsage(combinedSamples, "all", statsNow + 1);
+  assert.equal(combinedStatistics.totalCost, 10.13);
+  assert.equal(combinedStatistics.zeroCostModels, 3);
+  assert.deepEqual(modelsForMetric(combinedStatistics, "cost").map((item) => item.key), [
+    "acme/other",
+    "other-provider/deepseek-v4-pro",
+    "acme/pro-1",
+    "priced-only/legacy-cost",
+  ]);
+  assert.equal(modelsForMetric(combinedStatistics, "tokens").some((item) => item.key === "priced-only/legacy-cost"), false);
+  assert.equal(formatUsd(0.125), "$0.125");
+  assert.equal(formatUsd(9), "$9");
+  assert.equal(formatUsd(1_250), "$1.3k");
 
   const chart = renderUsageStats({
     width: 90,
@@ -186,12 +263,14 @@ try {
       ["other-provider/deepseek-v4-pro", "deepseek-v4-pro"],
     ]),
     range: "all",
+    metric: "tokens",
   }).join("\n");
   assert.match(chart, /Tokens per Day/);
   assert.match(chart, /● Pro 1 .*● Fable 5 .*● deepseek-v4-pro/);
   assert.match(chart, /In: 127\.4k · Out: 5\.1m · Cache: 800k/);
   assert.match(chart, /All time · Last 7 days · Last 30 days/);
   assert.match(chart, /[─│╭╮╰╯]/);
+  assert.match(chart, /^\s*0 ┼[─┴┬┼]+$/m);
   const dateAxis = chart.split("\n").find((line) => line.includes("Jul 26") && line.includes("Jul 27"));
   assert.ok(dateAxis);
   assert.equal(dateAxis.match(/Jul 26/g)?.length, 1);
@@ -213,9 +292,45 @@ try {
       ["other-provider/deepseek-v4-pro", "deepseek-v4-pro"],
     ]),
     range: "all",
+    metric: "tokens",
   }).join("\n");
   assert.match(dimChart, /Pro 1\x1b\[2m \(.*%\)\x1b\[22m/);
   assert.match(dimChart, /\x1b\[2m  In: 127\.4k · Out: 5\.1m · Cache: 800k\x1b\[22m/);
+
+  const costChart = renderUsageStats({
+    width: 140,
+    height: 5,
+    theme: { fg: (_color, text) => text, bold: (text) => text },
+    statistics: summarizeUsage(edgeSamples, "all", statsNow + 1),
+    labels: new Map([
+      ["priced-only/legacy-cost", "Legacy Cost"],
+      ["unpriced/zero-cost", "Zero Cost"],
+      ["invalid-cost/negative-cost", "Negative Cost"],
+      ["invalid-cost/infinite-cost", "Infinite Cost"],
+    ]),
+    range: "all",
+    metric: "cost",
+  }).join("\n");
+  assert.match(costChart, /Cost per Day/);
+  assert.match(costChart, /\$0\.005/);
+  assert.match(costChart, /Legacy Cost \(100\.0%\)/);
+  assert.match(costChart, /Cost: \$0\.005/);
+  assert.match(costChart, /3 models with \$0 recorded cost hidden/);
+  assert.doesNotMatch(costChart, /In:|Out:|Cache:|Zero Cost|Negative Cost|Infinite Cost/);
+  assert.ok(costChart.split("\n").every((line) => line.length <= 88));
+
+  const emptyCostChart = renderUsageStats({
+    width: 80,
+    theme: { fg: (_color, text) => text, bold: (text) => text },
+    statistics: summarizeUsage(edgeSamples.slice(1), "all", statsNow + 1),
+    labels: new Map(),
+    range: "all",
+    metric: "cost",
+  }).join("\n");
+  assert.match(emptyCostChart, /No recorded model cost was found in Pi sessions/);
+  assert.match(emptyCostChart, /3 models with \$0 recorded cost hidden/);
+  assert.match(emptyCostChart, /Tokens · Cost/);
+  assert.match(emptyCostChart, /All time · Last 7 days · Last 30 days/);
 
   const indexModule = await import("./index.ts");
   const extension = indexModule.default;
@@ -346,9 +461,9 @@ try {
       custom: async (factory) => {
         const interaction = customInteractions.shift();
         assert.ok(interaction, "Unexpected custom UI dialog");
-        return new Promise((resolve) => {
+        return new Promise((resolve, reject) => {
           const component = factory({ requestRender: () => {} }, ctx.ui.theme, {}, resolve);
-          interaction(component);
+          Promise.resolve(interaction(component)).catch(reject);
         });
       },
       setStatus: (key, value) => statuses.set(key, value),
@@ -366,7 +481,7 @@ try {
   assert.equal(widgets.get("pi-usage")?.options?.placement, "belowEditor");
   assert.equal(statuses.get("pi-usage"), undefined);
 
-  customInteractions.push((component) => {
+  customInteractions.push(async (component) => {
     const rendered = component.render(100).join("\n");
     assert.doesNotMatch(rendered, /pi-usage settings/);
     assert.match(rendered, /Refresh interval/);
@@ -383,15 +498,30 @@ try {
     const statsRendered = component.render(100).join("\n");
     assert.match(statsRendered, /Tokens per Day/);
     assert.match(statsRendered, /Loading usage history/);
+    assert.match(statsRendered, /Tokens · Cost/);
     assert.doesNotMatch(statsRendered, /● Pro 1|● Fable 5|In: 127\.4k/);
+    component.handleInput("\x1b[B");
+    const costLoadingRendered = component.render(100).join("\n");
+    assert.match(costLoadingRendered, /Cost per Day/);
+    assert.match(costLoadingRendered, /Loading usage history/);
     component.handleInput("\x1b[C");
     const recentStatsRendered = component.render(100).join("\n");
+    assert.match(recentStatsRendered, /Cost per Day/);
     assert.match(recentStatsRendered, /Last 7 days/);
-    assert.doesNotMatch(recentStatsRendered, /● Pro 1|● Fable 5/);
+    component.handleInput("\x1b[D");
+    assert.match(component.render(100).join("\n"), /Cost per Day/);
+    await waitUntil(() => !component.render(100).join("\n").includes("Loading usage history"));
+    const loadedCostRendered = component.render(100).join("\n");
+    assert.match(loadedCostRendered, /Cost per Day/);
+    assert.match(loadedCostRendered, /Cost: \$9/);
+    assert.doesNotMatch(loadedCostRendered, /Loading usage history|In:|Out:|Cache:/);
+    component.handleInput("\x1b[A");
+    assert.match(component.render(100).join("\n"), /Tokens per Day/);
+    component.handleInput("\x1b[B");
+    assert.match(component.render(100).join("\n"), /Cost per Day/);
     component.handleInput("\x1b");
   });
   await commands.get("usage").handler("", ctx);
-  await new Promise((resolve) => setTimeout(resolve, 100));
   const savedConfig = JSON.parse(readFileSync(join(stateDir, "pi-usage.json"), "utf8"));
   assert.equal(savedConfig.refreshIntervalSeconds, 300);
   assert.deepEqual(savedConfig.providerModes["new-api"], ["acme"]);
@@ -410,6 +540,16 @@ try {
     assert.match(rendered, /● Pro 1 .*● Fable 5/);
     assert.match(rendered, /In: 127\.4k · Out: 5\.1m · Cache: 800k/);
     assert.doesNotMatch(rendered, /Loading usage history|Refresh interval|Usage profile:|pi-usage\.json/);
+    component.handleInput("\x1b[B");
+    const cachedCostRendered = component.render(100).join("\n");
+    assert.match(cachedCostRendered, /Cost per Day/);
+    assert.match(cachedCostRendered, /● Fable 5 .*● deepseek-v4-pro .*● Pro 1/);
+    assert.match(cachedCostRendered, /Cost: \$9/);
+    assert.doesNotMatch(cachedCostRendered, /Loading usage history|In:|Out:|Cache:/);
+    component.handleInput("\x1b[C");
+    assert.match(component.render(100).join("\n"), /Cost per Day/);
+    component.handleInput("\x1b[A");
+    assert.match(component.render(100).join("\n"), /Tokens per Day/);
     component.handleInput("\x1b");
   });
   await commands.get("usage").handler("status", ctx);
