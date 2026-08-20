@@ -2,7 +2,7 @@
 
 根据 Pi 当前选中的模型自动显示订阅额度、账户余额、预算消耗或会话上下文/成本，并统计各模型的历史 token 使用趋势。
 
-额度信息通过 `belowEditor` widget 独占输入框下方一行，不与其他扩展的 footer status 挤在同一行。
+额度信息默认通过 `belowEditor` widget 显示在输入框下方一行，不与其他扩展的 footer status 挤在同一行。可在 `/usage` → `General` 中将 `Show usage realtime widget` 设为 `false`，只隐藏 `pi-usage` 自己的实时额度行；其他扩展的 widget、Stats 面板、后台刷新和缓存均不受影响。
 
 Widget 采用 `name • window1 • window2` 布局。订阅窗口保留进度条，例如 `Codex • 5h ───── 82% (resets 2h 13m) • 1w ─── 64% (resets 4d 8h)`。按量计费在能直接取得百分比或能由余额/已用量与总量计算百分比时也显示进度条，例如 `OpenRouter • ───── $80`；只有余额或消费额而没有任何总量信息时不显示进度条，例如 `DeepSeek • ¥12.5 left`。
 
@@ -82,6 +82,7 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
 ```json
 {
   "version": 1,
+  "showUsageRealtimeWidget": true,
   "refreshIntervalSeconds": 60,
   "barWidth": 12,
   "maxMeters": 2,
@@ -93,6 +94,7 @@ OpenRouter 和 DeepSeek 根据当前模型的官方 `baseUrl` 自动识别，因
 }
 ```
 
+- `showUsageRealtimeWidget`：是否显示 `pi-usage` 自己的实时额度行，默认为 `true`。设为 `false` 只隐藏显示，后台刷新、缓存、`/usage` 和 Stats 仍保持工作。
 - `refreshIntervalSeconds`：远程接口刷新间隔，限制为 15～3600 秒。
 - `barWidth`：进度条宽度，限制为 4～30。
 - `maxMeters`：按量计费 profile 最多同时显示 1～6 个指标；订阅 profile 会显示接口返回的全部有效限额窗口，不受此项截断。

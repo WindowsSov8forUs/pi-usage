@@ -480,16 +480,24 @@ try {
   assert.match(status, /^Custom • Context ─+ 75% • ─+ \$0\.875$/);
   assert.equal(widgets.get("pi-usage")?.options?.placement, "belowEditor");
   assert.equal(statuses.get("pi-usage"), undefined);
+  widgets.set("other-extension", { lines: ["Other widget"], options: { placement: "belowEditor" } });
 
   customInteractions.push(async (component) => {
     const rendered = component.render(100).join("\n");
     assert.doesNotMatch(rendered, /pi-usage settings/);
     assert.match(rendered, /Refresh interval/);
+    assert.match(rendered, /Show usage realtime widget.*true/);
     assert.match(rendered, /General.*Site Types.*Stats/);
     assert.match(rendered, /Esc to close/);
     assert.doesNotMatch(rendered, /Esc to cancel|Changes save and apply immediately|pi-usage\.json|Edit complete JSON|Reset to defaults/);
     component.handleInput("\r");
     component.handleInput("\r");
+    component.handleInput("\x1b[B");
+    component.handleInput("\x1b[B");
+    component.handleInput("\x1b[B");
+    component.handleInput("\r");
+    assert.equal(widgets.has("pi-usage"), false);
+    assert.equal(widgets.get("other-extension")?.lines.join("\n"), "Other widget");
     component.handleInput("\t");
     const siteTypeRendered = component.render(100).join("\n");
     assert.match(siteTypeRendered, /\bacme\b/);
@@ -524,6 +532,9 @@ try {
   await commands.get("usage").handler("", ctx);
   const savedConfig = JSON.parse(readFileSync(join(stateDir, "pi-usage.json"), "utf8"));
   assert.equal(savedConfig.refreshIntervalSeconds, 300);
+  assert.equal(savedConfig.showUsageRealtimeWidget, false);
+  assert.equal(widgets.has("pi-usage"), false);
+  assert.equal(widgets.has("other-extension"), true);
   assert.deepEqual(savedConfig.providerModes["new-api"], ["acme"]);
   assert.equal(savedConfig.profiles[0].id, "custom-session");
 

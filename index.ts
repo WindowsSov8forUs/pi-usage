@@ -112,6 +112,7 @@ type ProviderModes = {
 
 type UsageConfig = {
 	version: 1;
+	showUsageRealtimeWidget: boolean;
 	refreshIntervalSeconds: number;
 	barWidth: number;
 	maxMeters: number;
@@ -279,6 +280,7 @@ function parseProfile(value: unknown, index: number): UsageProfile {
 function defaultConfig(): UsageConfig {
 	return {
 		version: 1,
+		showUsageRealtimeWidget: true,
 		refreshIntervalSeconds: DEFAULT_REFRESH_SECONDS,
 		barWidth: DEFAULT_BAR_WIDTH,
 		maxMeters: 2,
@@ -297,6 +299,7 @@ function parseConfig(value: unknown): UsageConfig {
 	const maxMeters = finiteNumber(root.maxMeters) ?? 2;
 	return {
 		version: 1,
+		showUsageRealtimeWidget: root.showUsageRealtimeWidget !== false,
 		refreshIntervalSeconds: Math.max(15, Math.min(3_600, refresh)),
 		barWidth: Math.max(4, Math.min(30, Math.trunc(barWidth))),
 		maxMeters: Math.max(1, Math.min(6, Math.trunc(maxMeters))),
@@ -979,6 +982,10 @@ export default function piUsage(pi: ExtensionAPI) {
 			return;
 		}
 		const profile = activeProfile;
+		if (!config.showUsageRealtimeWidget) {
+			clearDisplay(ctx);
+			return;
+		}
 		if (activeMeters.length === 0) {
 			setDisplay(ctx, refreshFailed ? ctx.ui.theme.fg("dim", `${profile.label} unavailable`) : undefined);
 			return;
@@ -1164,6 +1171,13 @@ export default function piUsage(pi: ExtensionAPI) {
 				values: ["1", "2", "3", "4", "5", "6"],
 				description: "Maximum meters shown for metered profiles.",
 			},
+			{
+				id: "showUsageRealtimeWidget",
+				label: "Show usage realtime widget",
+				currentValue: String(draft.showUsageRealtimeWidget),
+				values: ["true", "false"],
+				description: "Whether to show the realtime usage widget below the editor.",
+			},
 		];
 		const buildSiteTypeSettings = (): SettingItem[] => provider ? [{
 			id: "currentProviderSiteType",
@@ -1245,6 +1259,7 @@ export default function piUsage(pi: ExtensionAPI) {
 					if (id === "refreshIntervalSeconds") next.refreshIntervalSeconds = Number.parseInt(value, 10);
 					else if (id === "barWidth") next.barWidth = Number(value);
 					else if (id === "maxMeters") next.maxMeters = Number(value);
+					else if (id === "showUsageRealtimeWidget") next.showUsageRealtimeWidget = value === "true";
 					else if (id === "currentProviderSiteType" && provider) {
 						next.providerModes["new-api"] = value === "New API"
 							? [...new Set([...next.providerModes["new-api"], provider])]
