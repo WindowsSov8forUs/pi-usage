@@ -11,13 +11,13 @@ Widget 采用 `name • window1 • window2` 布局。订阅窗口保留进度�
 从 GitHub Release 对应的 tag 安装（将仓库所有者和版本替换为实际值）：
 
 ```bash
-pi install git:github.com/OWNER/pi-usage@v0.2.0
+pi install git:github.com/OWNER/pi-usage@v0.2.1
 ```
 
 也可以先临时试用，不写入 Pi 设置：
 
 ```bash
-pi -e git:github.com/OWNER/pi-usage@v0.2.0
+pi -e git:github.com/OWNER/pi-usage@v0.2.1
 ```
 
 指定 tag 的安装是固定版本；发布新版本后，使用新 tag 再执行一次 `pi install`。如果安装不带 tag 的默认分支版本，则可通过 `pi update --extensions` 拉取更新，但可复现性不如 Release tag。
@@ -285,7 +285,7 @@ URL、header 和 JSON body 支持：
 仓库包含 `.github/workflows/release.yml`，在 GitHub Release 发布后自动验证该 Release：
 
 1. 修改 `package.json` 中的 `version`，提交并推送到默认分支。
-2. 在 GitHub 仓库中基于对应提交创建并发布 `v<version>` Release，例如 `v0.2.0`。
+2. 在 GitHub 仓库中基于对应提交创建并发布 `v<version>` Release，例如 `v0.2.1`。
 3. `release.published` 触发 Workflow；它 checkout Release tag，使用 Node.js 22 安装依赖并运行测试，再验证 tag 与 `package.json` 版本一致。
 4. 验证通过后，Workflow 将该 tag 的固定版本 `pi install` 命令写入现有 Release notes 和 job summary；它不会创建 tag 或 Release。
 
